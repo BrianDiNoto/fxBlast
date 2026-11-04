@@ -501,6 +501,17 @@ def get_active_model_panel() -> Optional[str]:
     return None
 
 
+def get_active_viewport_camera() -> Optional[dict]:
+    """The camera the artist is looking through in the active viewport."""
+    panel = get_active_model_panel()
+    if not panel:
+        return None
+    cam = cmds.modelPanel(panel, query=True, camera=True)
+    if cam and cmds.objExists(cam) and cmds.nodeType(cam) == "camera":
+        cam = (cmds.listRelatives(cam, parent=True) or [cam])[0]
+    return _camera_dict(cam)
+
+
 def get_panel_camera(panel: str) -> str:
     return cmds.modelPanel(panel, query=True, camera=True)
 

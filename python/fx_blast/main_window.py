@@ -15,22 +15,22 @@ from typing import Optional
 try:
     from PySide2.QtWidgets import (
         QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-        QDialogButtonBox, QDoubleSpinBox, QFrame, QFormLayout,
+        QDialogButtonBox, QDoubleSpinBox, QFrame, QFormLayout, QGridLayout,
         QGroupBox, QHBoxLayout, QHeaderView, QLabel,
         QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
         QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStyle,
-        QStyledItemDelegate, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+        QStyledItemDelegate, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     )
     from PySide2.QtCore import Qt, QTimer
     from PySide2.QtGui import QColor, QFont, QFontMetrics, QIcon
 except ImportError:
     from PySide6.QtWidgets import (
         QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-        QDialogButtonBox, QDoubleSpinBox, QFrame, QFormLayout,
+        QDialogButtonBox, QDoubleSpinBox, QFrame, QFormLayout, QGridLayout,
         QGroupBox, QHBoxLayout, QHeaderView, QLabel,
         QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
         QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStyle,
-        QStyledItemDelegate, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+        QStyledItemDelegate, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     )
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon
@@ -212,6 +212,35 @@ _S_NOTE_EDIT = f"""
     QLineEdit:focus {{ border-color: rgba(255,255,255,0.22); }}
 """
 _S_SMALL_BTN = "font-size: 11px; padding: 3px 8px;"
+# Mode tabs under the breadcrumb: Simple / Advanced / Manual
+_S_TABS = """
+    QFrame#fxBlastTabs { background: #3c3c3c; border-bottom: 1px solid #2a2a2a; }
+    QTabBar { background: transparent; }
+    QTabBar::tab {
+        background: transparent; color: #8a8a8a; font-size: 12px;
+        padding: 7px 0; min-width: 60px; border: none;
+        border-bottom: 2px solid transparent;
+    }
+    QTabBar::tab:selected { color: #eaeaea; background: #444444; border-bottom-color: #6fb3e0; }
+    QTabBar::tab:hover:!selected { color: #b8b8b8; }
+    QTabBar::tab:disabled { color: #5a5a5a; }
+"""
+# Simple tab: the one big Playblast button
+_S_HERO = """
+    QPushButton#fxBlastHero {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #4b7fa3, stop:1 #3d6a8a);
+        border: 1px solid #5a93ba; border-radius: 5px; min-height: 52px;
+    }
+    QPushButton#fxBlastHero:hover {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #5389ae, stop:1 #437294);
+    }
+    QPushButton#fxBlastHero:pressed  { background: #36607d; }
+    QPushButton#fxBlastHero:disabled { background: #333333; border-color: #444444; }
+    QLabel#fxBlastHeroTitle { color: #eaf4fb; font-size: 16px; font-weight: 600; background: transparent; }
+    QLabel#fxBlastHeroSub   { color: #b6d3e6; font-size: 11px; background: transparent; }
+    QLabel#fxBlastHeroTitle:disabled { color: #666666; }
+    QLabel#fxBlastHeroSub:disabled   { color: #555555; }
+"""
 _S_SUB_LBL   = f"font-size: 11px; color: {_C_DIM}; margin-left: 20px;"
 _S_DOCK_BTN  = """
     QPushButton {
@@ -451,6 +480,7 @@ class PlayblastTool(*_TOOL_BASES):
         # Context breadcrumb sits above the scroll area, like the other FX
         # tools' top readout -- it stays visible no matter what's scrolled.
         outer.addWidget(self._build_context_bar())
+        outer.addWidget(self._build_tab_bar())
 
         # Sections live in a scroll area so opening a panel (e.g. render
         # layers) never squashes the rest - the window scrolls instead.
@@ -482,18 +512,31 @@ class PlayblastTool(*_TOOL_BASES):
         root.addWidget(self._refresh_btn)
 
         root.addWidget(self._build_scene_section())
-        root.addWidget(_hline())
-        root.addWidget(self._build_camera_section())
-        root.addWidget(self._build_layers_section())
+        # Advanced-only widgets are kept so the tab switch can show/hide them
+        self._cam_hline      = _hline()
+        self._cam_section    = self._build_camera_section()
+        self._layers_section = self._build_layers_section()
+        root.addWidget(self._cam_hline)
+        root.addWidget(self._cam_section)
+        root.addWidget(self._layers_section)
         root.addWidget(_hline())
         root.addWidget(self._build_anamorphic_section())
         root.addWidget(_hline())
         root.addWidget(self._build_format_section())
         root.addWidget(_hline())
         root.addWidget(self._build_note_section())
-        root.addWidget(self._build_playblast_options_section())
+        self._po_section = self._build_playblast_options_section()
+        root.addWidget(self._po_section)
 
-        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
+        # Simple tab: which camera will be blasted, then the big button
+        self._simple_cam_lbl = QLabel()
+        self._simple_cam_lbl.setStyleSheet(f"font-size:11px; color:{_C_DIM};")
+        root.addWidget(self._simple_cam_lbl)
+        root.addWidget(self._build_hero_button())
+
+        self._blast_row = QWidget()
+        btn_row = QHBoxLayout(self._blast_row); btn_row.setSpacing(8)
+        btn_row.setContentsMargins(0, 0, 0, 0)
         self._blast_btn = QPushButton("Playblast")
         self._blast_btn.setStyleSheet(_S_BLAST)
         self._blast_btn.setFixedWidth(140)
@@ -501,10 +544,11 @@ class PlayblastTool(*_TOOL_BASES):
         btn_row.addStretch()
         btn_row.addWidget(self._blast_btn)
         btn_row.addStretch()
-        root.addLayout(btn_row)
+        root.addWidget(self._blast_row)
 
         root.addWidget(self._build_output_section())
-        root.addWidget(self._build_versions_section())
+        self._versions_section = self._build_versions_section()
+        root.addWidget(self._versions_section)
         root.addStretch()
 
         footer = QHBoxLayout(); footer.setSpacing(6)
@@ -525,7 +569,90 @@ class PlayblastTool(*_TOOL_BASES):
         footer.addWidget(self._dock_btn)
         outer.addLayout(footer)
 
+        self._apply_tab_mode()
+
     # ── Scene ─────────────────────────────────────────────────────────────────
+
+    # ── Mode tabs ─────────────────────────────────────────────────────────────
+
+    _TAB_SIMPLE, _TAB_ADVANCED, _TAB_MANUAL = 0, 1, 2
+
+    def _build_tab_bar(self) -> QWidget:
+        frame = QFrame(); frame.setObjectName("fxBlastTabs")
+        frame.setStyleSheet(_S_TABS)
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._tab_bar = QTabBar()
+        self._tab_bar.setExpanding(True)
+        self._tab_bar.setDrawBase(False)
+        for name in ("Simple", "Advanced", "Manual"):
+            self._tab_bar.addTab(name)
+        # Manual (out-of-pipeline) mode arrives in the next step
+        self._tab_bar.setTabEnabled(self._TAB_MANUAL, False)
+        self._tab_bar.setTabToolTip(self._TAB_MANUAL, "Out-of-pipeline blasts - coming soon")
+        self._tab_bar.setCurrentIndex(self._TAB_SIMPLE)
+        self._tab_bar.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self._tab_bar)
+        return frame
+
+    def _is_simple(self) -> bool:
+        bar = getattr(self, "_tab_bar", None)
+        return bool(bar and bar.currentIndex() == self._TAB_SIMPLE)
+
+    def _on_tab_changed(self, _index: int) -> None:
+        self._apply_tab_mode()
+        self._update_output_preview()
+
+    def _apply_tab_mode(self) -> None:
+        """Simple hides the Advanced-only sections. Both tabs share the same
+        widgets, so frame range, format, note etc. never go out of sync."""
+        simple = self._is_simple()
+        for w in (self._cam_hline, self._cam_section, self._layers_section,
+                  self._po_section, self._blast_row, self._versions_section):
+            w.setVisible(not simple)
+        for w in (self._simple_cam_lbl, self._hero_btn):
+            w.setVisible(simple)
+
+    def _build_hero_button(self) -> QPushButton:
+        self._hero_btn = QPushButton()
+        self._hero_btn.setObjectName("fxBlastHero")
+        self._hero_btn.setStyleSheet(_S_HERO)
+        self._hero_btn.setCursor(Qt.PointingHandCursor)
+        lay = QVBoxLayout(self._hero_btn)
+        lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(1)
+        self._hero_title = QLabel("Playblast"); self._hero_title.setObjectName("fxBlastHeroTitle")
+        self._hero_sub   = QLabel("");          self._hero_sub.setObjectName("fxBlastHeroSub")
+        for lbl in (self._hero_title, self._hero_sub):
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+            lay.addWidget(lbl)
+        self._hero_btn.clicked.connect(self._on_playblast)
+        return self._hero_btn
+
+    def _update_hero_sub(self) -> None:
+        if not hasattr(self, "_hero_sub"):
+            return
+        cams = self._blast_cameras() if self._tokens else []
+        if self._tokens is None or not cams:
+            self._hero_sub.setText("")
+            return
+        version = self._resolver.version if self._resolver else self._tokens.version
+        self._hero_sub.setText(
+            f"{version}   \u2022   {cams[0]['label']}   \u2022   "
+            f"{self._start_spin.value()}-{self._end_spin.value()}")
+
+    # Both Playblast buttons (Advanced + Simple hero) change together
+    def _set_blast_enabled(self, enabled: bool) -> None:
+        self._blast_btn.setEnabled(enabled)
+        self._hero_btn.setEnabled(enabled)
+
+    def _set_blast_text(self, text: str) -> None:
+        self._blast_btn.setText(text)
+        idle = text == "Playblast"
+        self._hero_title.setText(text)
+        self._hero_sub.setVisible(idle)
+        if idle:
+            self._update_hero_sub()
 
     def _build_context_bar(self) -> QWidget:
         """Show / Season / Type / Asset / Task / Scene / Version, as one
@@ -582,6 +709,8 @@ class PlayblastTool(*_TOOL_BASES):
         self._end_spin   = QSpinBox(); self._end_spin.setRange(-10000, 100000);   self._end_spin.setMaximumWidth(70)
         fr_btn = QPushButton("From scene"); fr_btn.setStyleSheet(_S_REFRESH)
         fr_btn.setMaximumHeight(24); fr_btn.clicked.connect(self._refresh_frame_range)
+        self._start_spin.valueChanged.connect(self._update_hero_sub)
+        self._end_spin.valueChanged.connect(self._update_hero_sub)
         row.addWidget(self._start_spin); row.addWidget(_lbl("to"))
         row.addWidget(self._end_spin); row.addSpacing(6); row.addWidget(fr_btn); row.addStretch()
         return w
@@ -731,7 +860,12 @@ class PlayblastTool(*_TOOL_BASES):
         layout = QVBoxLayout(w)
         layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(5)
         layout.addWidget(_section_header("Format"))
-        fmt_row = QHBoxLayout(); fmt_row.setSpacing(16)
+        # Grid, so every row of options lines up in the same columns
+        grid = QGridLayout(); grid.setContentsMargins(20, 0, 0, 0)
+        grid.setHorizontalSpacing(10); grid.setVerticalSpacing(5)
+        seq_lbl = QLabel("Sequence"); seq_lbl.setStyleSheet(f"font-size:11px; color:{_C_DIM};")
+        seq_lbl.setFixedWidth(72)
+        grid.addWidget(seq_lbl, 0, 0)
         self._fmt_btn_group = QButtonGroup(self)
         for i, fmt in enumerate(IMAGE_FORMATS):
             rb = QRadioButton(FORMAT_LABELS.get(fmt, fmt.upper()))
@@ -739,9 +873,9 @@ class PlayblastTool(*_TOOL_BASES):
             if fmt == DEFAULT_FORMAT: rb.setChecked(True)
             self._fmt_btn_group.addButton(rb, i)
             rb.toggled.connect(self._update_output_preview)
-            fmt_row.addWidget(rb)
-        fmt_row.addStretch()
-        layout.addLayout(fmt_row)
+            grid.addWidget(rb, 0, i + 1)
+        grid.setColumnStretch(4, 1)
+        layout.addLayout(grid)
         return w
 
     # ── Note ─────────────────────────────────────────────────────────────────
@@ -947,8 +1081,27 @@ class PlayblastTool(*_TOOL_BASES):
         self._output_path_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self._output_path_lbl.setMinimumWidth(1)
         self._output_path_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._output_path_lbl)
+        row = QHBoxLayout(); row.setSpacing(6)
+        row.addWidget(self._output_path_lbl, 1)
+        open_btn = QPushButton("Open folder")
+        open_btn.setStyleSheet(_S_REFRESH)
+        open_btn.setToolTip("Open this scene's output folder in Explorer")
+        open_btn.clicked.connect(self._on_open_folder)
+        row.addWidget(open_btn, 0, Qt.AlignTop)
+        layout.addLayout(row)
         return w
+
+    def _on_open_folder(self) -> None:
+        """Open the current version folder, or the images folder above it
+        when this version has not been blasted yet."""
+        if self._tokens is None:
+            self._set_status("No scene info - nothing to open.", error=True); return
+        candidates = [self._resolver.output_folder] if self._resolver else []
+        candidates.append(self._tokens.images_root)
+        for folder in candidates:
+            if folder and os.path.isdir(folder):
+                self._open_file_location(folder); return
+        self._set_status("Output folder does not exist yet - blast first.", error=True)
 
     # ── Version list ──────────────────────────────────────────────────────────
 
@@ -1048,7 +1201,7 @@ class PlayblastTool(*_TOOL_BASES):
         except (ParseError, Exception) as exc:
             self._tokens = None; self._resolver = None
             self._error_banner.setText(str(exc)); self._error_banner.setVisible(True)
-            self._blast_btn.setEnabled(False); self._output_path_lbl.setText("--")
+            self._set_blast_enabled(False); self._output_path_lbl.setText("--")
             self._refresh_btn.setStyleSheet(_S_REFRESH_ERROR)
             return
         self._refresh_btn.setStyleSheet(
@@ -1485,7 +1638,7 @@ class PlayblastTool(*_TOOL_BASES):
                 image_format=fmt, frame_padding=FRAME_PADDING,
             )
         except (ResolveError, ValueError) as exc:
-            self._output_path_lbl.setText(f"  {exc}"); self._blast_btn.setEnabled(False); return
+            self._output_path_lbl.setText(f"  {exc}"); self._set_blast_enabled(False); return
 
         if self._layers_mode():
             jobs  = self._layer_jobs()
@@ -1497,10 +1650,14 @@ class PlayblastTool(*_TOOL_BASES):
             if len(jobs) > 4:
                 lines.append(f"... and {len(jobs) - 4} more layers")
             self._set_output_paths(lines or [self._resolver.output_folder])
-            self._blast_btn.setEnabled(bool(jobs))
+            self._set_blast_enabled(bool(jobs))
             return
 
-        cams = self._selected_cameras()
+        cams = self._blast_cameras()
+        if self._is_simple():
+            self._simple_cam_lbl.setText(
+                f"Camera:  {cams[0]['label']}  (active viewport)" if cams else
+                "No camera in the active viewport - click in a viewport, then Refresh scene.")
         lines = []
         for cam in cams:
             slug = _cam_slug(cam["label"])
@@ -1510,7 +1667,7 @@ class PlayblastTool(*_TOOL_BASES):
             lines.append(f"{folder}{tag}")
         self._set_output_paths(lines or [self._resolver.output_folder])
 
-        self._blast_btn.setEnabled(bool(cams))
+        self._set_blast_enabled(bool(cams))
 
         if self._ana_chk.isChecked() and cams:
             from .maya_bridge import calculate_anamorphic_blast_size
@@ -1518,6 +1675,7 @@ class PlayblastTool(*_TOOL_BASES):
             cam_res = self._cam_res(cams[0]["label"])
             bw, bh = calculate_anamorphic_blast_size(cam_res[0], cam_res[1], sq)
             self._blast_size_lbl.setText(f"\u2192  blast at {bw} x {bh} px  (PAR {sq}:1)")
+        self._update_hero_sub()
 
     def _set_output_paths(self, lines: list[str]) -> None:
         """Show output paths so they wrap at folder separators (they have no
@@ -1651,9 +1809,17 @@ class PlayblastTool(*_TOOL_BASES):
         if self._layers_mode():
             self._start_layer_blast(); return
 
-        cams = self._selected_cameras()
+        cams = self._blast_cameras()
         if not cams:
-            QMessageBox.warning(self, "No camera", "Please check at least one camera."); return
+            QMessageBox.warning(
+                self, "No camera",
+                "Click in a viewport so fxBlast can use its camera." if self._is_simple()
+                else "Please check at least one camera."); return
+        # Simple: blast through the same viewport the camera was read from
+        panel = None
+        if self._is_simple():
+            from .maya_bridge import get_active_model_panel
+            panel = get_active_model_panel()
 
         # Always check each camera's subfolder for existing frames
         if not self._confirm_overwrite([
@@ -1664,7 +1830,7 @@ class PlayblastTool(*_TOOL_BASES):
         s        = self._blast_settings()
         is_multi = len(cams) > 1
 
-        self._blast_btn.setEnabled(False)
+        self._set_blast_enabled(False)
         QApplication.processEvents()
 
         last_folder = None
@@ -1674,15 +1840,16 @@ class PlayblastTool(*_TOOL_BASES):
             for idx, cam in enumerate(cams):
                 label = (f"Blasting {idx+1}/{len(cams)} \u2014 {cam['label']}..."
                          if is_multi else "Blasting...")
-                self._blast_btn.setText(label); QApplication.processEvents()
-                last_folder = self._blast_one(cam, _cam_slug(cam["label"]), s, fps)
+                self._set_blast_text(label); QApplication.processEvents()
+                last_folder = self._blast_one(cam, _cam_slug(cam["label"]), s, fps,
+                                              panel=panel)
             self._after_blast(last_folder, s, fps, cams)
 
         except Exception as exc:
             QMessageBox.critical(self, "Playblast failed", f"The playblast did not complete:\n\n{exc}")
             self._set_status(f"Blast failed: {exc}", error=True)
         finally:
-            self._blast_btn.setText("Playblast"); self._blast_btn.setEnabled(True)
+            self._set_blast_text("Playblast"); self._set_blast_enabled(True)
             self._update_output_preview()
 
     # ── Render-layer stepping ─────────────────────────────────────────────────
@@ -1718,7 +1885,7 @@ class PlayblastTool(*_TOOL_BASES):
             settle=self._settle_spin.value(),
             done=[], errors=[], last=None,
         )
-        self._blast_btn.setEnabled(False)
+        self._set_blast_enabled(False)
         self._set_status(f"Stepping {len(jobs)} layers through {panel}...")
         QTimer.singleShot(0, self._layer_step_switch)
 
@@ -1727,7 +1894,7 @@ class PlayblastTool(*_TOOL_BASES):
         if lb["i"] >= len(lb["jobs"]):
             self._layer_finish(); return
         layer, cam = lb["jobs"][lb["i"]]
-        self._blast_btn.setText(f"Layer {lb['i']+1}/{len(lb['jobs'])} \u2014 {layer}...")
+        self._set_blast_text(f"Layer {lb['i']+1}/{len(lb['jobs'])} \u2014 {layer}...")
         try:
             from .maya_bridge import set_panel_camera, switch_render_layer
             switch_render_layer(layer)
@@ -1765,7 +1932,7 @@ class PlayblastTool(*_TOOL_BASES):
             set_panel_camera(lb["panel"], lb["orig_cam"])
         except Exception:
             pass
-        self._blast_btn.setText("Playblast"); self._blast_btn.setEnabled(True)
+        self._set_blast_text("Playblast"); self._set_blast_enabled(True)
         if lb["done"]:
             self._after_blast(lb["last"], lb["s"], lb["fps"],
                               [c for _, c in lb["done"]],
@@ -1894,6 +2061,18 @@ class PlayblastTool(*_TOOL_BASES):
                 result.append(item.data(Qt.UserRole))
         return result
 
+    def _blast_cameras(self) -> list[dict]:
+        """Cameras the next blast uses: Simple = the active viewport's
+        camera, Advanced = the checked cameras."""
+        if not self._is_simple():
+            return self._selected_cameras()
+        try:
+            from .maya_bridge import get_active_viewport_camera
+            cam = get_active_viewport_camera()
+        except Exception:
+            cam = None
+        return [cam] if cam else []
+
     def _first_checked_camera(self) -> Optional[dict]:
         cams = self._selected_cameras()
         return cams[0] if cams else None
@@ -2001,7 +2180,7 @@ class PlayblastTool(*_TOOL_BASES):
 
     def _layers_mode(self) -> bool:
         chk = getattr(self, "_layers_chk", None)
-        return bool(chk and chk.isChecked())
+        return bool(chk and chk.isChecked()) and not self._is_simple()
 
     def _layer_jobs(self) -> list[tuple[str, dict]]:
         """(layer, camera) for every checked layer that has a camera to use."""
