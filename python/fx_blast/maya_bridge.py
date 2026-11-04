@@ -13,7 +13,7 @@ from typing import Optional
 import maya.cmds as cmds
 
 from .config import DEFAULT_FORMAT, DEFAULT_SQUEEZE_FACTOR, FORMAT_EXTENSIONS, FRAME_PADDING
-from .scene_parser import ParseError, parse_scene_path, SceneTokens
+from .scene_parser import ParseError, manual_tokens, parse_scene_path, SceneTokens
 from .resolver import OutputResolver
 
 _DEFAULT_CAMERAS = {"persp", "top", "front", "side", "perspShape",
@@ -40,6 +40,54 @@ def get_scene_path() -> str:
 
 def get_scene_tokens() -> SceneTokens:
     return parse_scene_path(get_scene_path())
+
+
+# ── Maya project (Manual mode) ─────────────────────────────────────────────────
+
+def get_project_root() -> str:
+    return os.path.normpath(cmds.workspace(query=True, rootDirectory=True) or "")
+
+
+def project_is_set(root: str) -> bool:
+    """Maya always has a workspace; its built-in "default" project under
+    .../maya/projects/ counts as no project set."""
+    norm = root.replace("\\", "/").rstrip("/").lower()
+    return bool(norm) and not norm.endswith("/maya/projects/default")
+
+
+def set_project(path: str) -> None:
+    cmds.workspace(path, openWorkspace=True)
+
+
+def _project_folder(rule: str, fallback: str) -> str:
+    try:
+        entry = cmds.workspace(fileRuleEntry=rule) or fallback
+    except Exception:
+        entry = fallback
+    return os.path.normpath(cmds.workspace(expandName=entry))
+
+
+def get_manual_tokens() -> SceneTokens:
+    """
+    Tokens for Manual (out-of-pipeline) mode: output goes to the Maya
+    project's images/ and movies/ folders. A workfile name without a
+    version gets the next version after the highest one already blasted.
+    """
+    scene = get_scene_path()
+    root  = get_project_root()
+    if not project_is_set(root):
+        raise ParseError(
+            "No Maya project is set.\n\n"
+            "Click Set Project... and pick the project folder. Blasts go to "
+            "the project's images/ and movies/ folders.")
+    tokens = manual_tokens(scene, os.path.basename(root),
+                           _project_folder("images", "images"),
+                           _project_folder("movie", "movies"))
+    if not tokens.version:
+        existing = OutputResolver(tokens).existing_versions()
+        top = max((int(v[1:]) for v in existing), default=0)
+        tokens.version = f"v{top + 1:03d}"
+    return tokens
 
 
 # ── Cameras ────────────────────────────────────────────────────────────────────
@@ -225,23 +273,22 @@ def calculate_anamorphic_blast_size(
 # ── HUD ────────────────────────────────────────────────────────────────────────
 
 def setup_hud(
-    tokens:       SceneTokens,
-    version:      str,
     camera_name:  str,
     camera_shape: str,
     width:        int,
     height:       int,
     fps:          float,
-    note:         str = "",
-    start_frame:  int = 1,
-    end_frame:    int = 1,
+    start_frame:  int,
+    end_frame:    int,
+    fields:       set,
 ) -> dict:
     """
-    Paint a compact two-line HUD at the bottom of the viewport.
+    Paint the burn-in HUD. `fields` holds the ids from config.BURN_IN_FIELDS
+    the artist left on; anything not in it is left out.
 
-    Bottom-left line 1 — show  season  shot  task  version
-    Bottom-left line 2 — camera  focal_length  fps  frame_range
-    Bottom-right       — per-frame counter (refreshes each frame)
+    Bottom-center line 1 -- camera name   focal length
+    Bottom-center line 2 -- resolution   frame rate
+    Bottom-right         -- current frame   (frame range), refreshed per frame
 
     Returns a snapshot of pre-existing HUD state for restoration.
     """
@@ -257,24 +304,25 @@ def setup_hud(
         except Exception:
             snapshot[hud_id] = False
 
-    # Focal length
-    fl_raw = _safe_get_attr(camera_shape, "focalLength")
-    fl_str = f"  {int(round(fl_raw))}mm" if fl_raw else ""
+    line1, line2 = [], []
+    if "camera" in fields:
+        line1.append(camera_name)
+    if "focal" in fields:
+        fl_raw = _safe_get_attr(camera_shape, "focalLength")
+        if fl_raw:
+            line1.append(f"{int(round(fl_raw))}mm")
+    if "res" in fields:
+        line2.append(f"{width}x{height}")
+    if "fps" in fields:
+        line2.append(f"{int(fps)}fps" if fps == int(fps) else f"{fps}fps")
 
-    fps_str   = f"{int(fps)}fps" if fps == int(fps) else f"{fps}fps"
-    range_str = f"{start_frame}-{end_frame}"
-
-    line1 = (f"{tokens.show}   {tokens.season}   "
-             f"{tokens.shot}   {tokens.discipline}   {version}")
-    line2 = f"{camera_name}{fl_str}   {fps_str}   {range_str}"
-
-    # Bottom-left: two info lines  (section 7)
-    _add_hud("FXpblast_line1", section=7, block=0, label=line1)
-    _add_hud("FXpblast_line2", section=7, block=1, label=line2)
-
-    # Bottom-right: per-frame counter  (section 9)
-    _add_hud("FXpblast_frame", section=9, block=0,
-             label="", command=_frame_counter_cmd(), attach=True)
+    if line1:
+        _add_hud("FXpblast_line1", section=7, block=0, label="   ".join(line1))
+    if line2:
+        _add_hud("FXpblast_line2", section=7, block=1, label="   ".join(line2))
+    if "range" in fields:
+        _add_hud("FXpblast_frame", section=9, block=0, label="",
+                 command=_frame_counter_cmd(start_frame, end_frame), attach=True)
 
     return snapshot
 
@@ -326,9 +374,10 @@ def _add_hud(
         pass
 
 
-def _frame_counter_cmd() -> str:
-    """Return a MEL expression string for a per-frame counter."""
-    return 'int $f = `currentTime -q`; string $s = "Frame  " + $f; $s'
+def _frame_counter_cmd(start_frame: int, end_frame: int) -> str:
+    """MEL expression: current frame plus the blast's frame range."""
+    return ('int $f = `currentTime -q`; '
+            f'string $s = "Frame  " + $f + "   ({start_frame}-{end_frame})"; $s')
 
 
 # ── Playblast execution ────────────────────────────────────────────────────────

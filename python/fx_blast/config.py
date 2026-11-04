@@ -92,6 +92,52 @@ FORMAT_EXTENSIONS = {
     "png_alpha": "png",
 }
 
+# ── Movies ─────────────────────────────────────────────────────────────────────
+# A movie format still blasts (and keeps) an image sequence, then encodes it
+# with ffmpeg into the movies folder. JPG feeds H.264 (small, 8-bit anyway);
+# PNG feeds ProRes so the 10-bit codec gets lossless input.
+
+MOVIE_FORMATS = ["h264", "prores"]
+
+MOVIE_LABELS = {
+    "h264":   "H.264 .mp4",
+    "prores": "ProRes .mov",
+}
+
+MOVIE_EXTENSIONS = {
+    "h264":   "mp4",
+    "prores": "mov",
+}
+
+MOVIE_SEQUENCE_FORMAT = {
+    "h264":   "jpg",
+    "prores": "png",
+}
+
+# (id, label, prores_ks profile number)
+PRORES_PROFILES = [
+    ("422",   "422",    2),
+    ("422hq", "422 HQ", 3),
+    ("4444",  "4444",   4),
+]
+DEFAULT_PRORES_PROFILE = "422hq"
+
+# ffmpeg isn't on PATH at this studio; it is a rez package, called through
+# rez-env. FX_FFMPEG_PATH (full path to ffmpeg.exe) skips rez entirely.
+FFMPEG_REZ_PACKAGE = "ffmpeg-8.0.0"
+FFMPEG_PATH        = os.environ.get("FX_FFMPEG_PATH") or ""
+
+# ── Burn-in HUD ────────────────────────────────────────────────────────────────
+# (id, label) -- every field is on by default; the artist can turn each off.
+
+BURN_IN_FIELDS = [
+    ("focal",  "Focal length"),
+    ("fps",    "Frame rate"),
+    ("range",  "Frame range"),
+    ("res",    "Resolution"),
+    ("camera", "Camera name"),
+]
+
 # ── Frame padding ───────────────────────────────────────────────────────────────
 
 FRAME_PADDING = 4

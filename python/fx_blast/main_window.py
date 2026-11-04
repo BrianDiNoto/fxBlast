@@ -14,7 +14,7 @@ from typing import Optional
 
 try:
     from PySide2.QtWidgets import (
-        QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
+        QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
         QDialogButtonBox, QDoubleSpinBox, QFrame, QFormLayout, QGridLayout,
         QGroupBox, QHBoxLayout, QHeaderView, QLabel,
         QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
@@ -25,7 +25,7 @@ try:
     from PySide2.QtGui import QColor, QFont, QFontMetrics, QIcon
 except ImportError:
     from PySide6.QtWidgets import (
-        QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
+        QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
         QDialogButtonBox, QDoubleSpinBox, QFrame, QFormLayout, QGridLayout,
         QGroupBox, QHBoxLayout, QHeaderView, QLabel,
         QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
@@ -42,12 +42,31 @@ except ImportError:
     _TOOL_BASES = (QWidget,)
 
 from .config import (
-    ANAMORPHIC_SQUEEZE_FACTORS, DEFAULT_FORMAT, DEFAULT_RESOLUTION,
-    DEFAULT_SQUEEZE_FACTOR, FORMAT_EXTENSIONS, FORMAT_LABELS,
-    FRAME_PADDING, IMAGE_FORMATS, RV_PATH,
+    ANAMORPHIC_SQUEEZE_FACTORS, BURN_IN_FIELDS, DEFAULT_FORMAT,
+    DEFAULT_PRORES_PROFILE, DEFAULT_RESOLUTION, DEFAULT_SQUEEZE_FACTOR,
+    FORMAT_EXTENSIONS, FORMAT_LABELS, FRAME_PADDING, IMAGE_FORMATS,
+    MOVIE_FORMATS, MOVIE_LABELS, MOVIE_SEQUENCE_FORMAT, PRORES_PROFILES, RV_PATH,
 )
 from .scene_parser import ParseError, SceneTokens
 from .resolver import OutputResolver, ResolveError, build_resolver
+
+# Radio-button ids in the Format section: sequences first, then movies
+_ALL_FORMATS = IMAGE_FORMATS + MOVIE_FORMATS
+_FRAME_EXTS  = (".jpg", ".png")
+
+
+class _Stopped(Exception):
+    """The artist stopped the blast (Stop button or Esc in Maya)."""
+
+
+def _frames_in(folder: str) -> list[str]:
+    """Image frames directly inside `folder`, any format, sorted."""
+    try:
+        return sorted(os.path.join(folder, f) for f in os.listdir(folder)
+                      if f.lower().endswith(_FRAME_EXTS))
+    except OSError:
+        return []
+
 
 _NOTES_FILENAME = "_pb_notes.json"
 _META_FILENAME  = "_pb_meta.json"
@@ -136,6 +155,40 @@ _S_BLAST_DONE = """
     QPushButton:hover   { background: #3d5e3d; }
     QPushButton:pressed { background: #28402a; }
     QPushButton:disabled{ background: #222e22; color: #445044; border-color: #2e3e2e; }
+"""
+# Blast buttons while a blast runs: they turn into Stop
+_S_STOP = """
+    QPushButton {
+        background: #6a2e2e; color: #ffd0d0; border: 1px solid #a04848;
+        border-radius: 4px; padding: 3px 0; font-size: 12px; min-height: 22px;
+    }
+    QPushButton:hover { background: #7a3636; }
+"""
+_S_HERO_STOP = """
+    QPushButton#fxBlastHero {
+        background: #6a2e2e; border: 1px solid #a04848; border-radius: 5px; min-height: 52px;
+    }
+    QPushButton#fxBlastHero:hover { background: #7a3636; }
+    QLabel#fxBlastHeroTitle { color: #ffe0e0; font-size: 16px; font-weight: 600; background: transparent; }
+    QLabel#fxBlastHeroSub   { color: #f0b0b0; font-size: 11px; background: transparent; }
+"""
+# Manual tab: Simple / Advanced toggle and the project box
+_S_MODE_BTN = """
+    QPushButton {
+        background: transparent; color: #8a8a8a; border: 1px solid #5a5a5a;
+        padding: 3px 12px; font-size: 11px;
+    }
+    QPushButton:checked { background: #5a5a5a; color: #eaeaea; }
+"""
+_S_PROJECT_OK = """
+    QFrame#fxBlastProject { border: 1px solid rgba(255,255,255,0.12); border-radius: 3px;
+                            background: rgba(0,0,0,0.15); }
+    QLabel { border: none; background: transparent; }
+"""
+_S_PROJECT_MISSING = """
+    QFrame#fxBlastProject { border: 1px solid rgba(200,170,60,0.45); border-radius: 3px;
+                            background: rgba(200,170,60,0.10); }
+    QLabel { border: none; background: transparent; }
 """
 # Small per-row "Play in RV" button used in the version list
 _S_RV_MINI = """
@@ -510,6 +563,7 @@ class PlayblastTool(*_TOOL_BASES):
             "\nRed = could not read this scene.")
         self._refresh_btn.clicked.connect(self._refresh_scene)
         root.addWidget(self._refresh_btn)
+        root.addWidget(self._build_manual_box())
 
         root.addWidget(self._build_scene_section())
         # Advanced-only widgets are kept so the tab switch can show/hide them
@@ -540,7 +594,7 @@ class PlayblastTool(*_TOOL_BASES):
         self._blast_btn = QPushButton("Playblast")
         self._blast_btn.setStyleSheet(_S_BLAST)
         self._blast_btn.setFixedWidth(140)
-        self._blast_btn.clicked.connect(self._on_playblast)
+        self._blast_btn.clicked.connect(self._on_blast_clicked)
         btn_row.addStretch()
         btn_row.addWidget(self._blast_btn)
         btn_row.addStretch()
@@ -587,19 +641,38 @@ class PlayblastTool(*_TOOL_BASES):
         self._tab_bar.setDrawBase(False)
         for name in ("Simple", "Advanced", "Manual"):
             self._tab_bar.addTab(name)
-        # Manual (out-of-pipeline) mode arrives in the next step
-        self._tab_bar.setTabEnabled(self._TAB_MANUAL, False)
-        self._tab_bar.setTabToolTip(self._TAB_MANUAL, "Out-of-pipeline blasts - coming soon")
+        self._tab_bar.setTabToolTip(
+            self._TAB_MANUAL, "Blast a scene that is not in the pipeline, into the Maya project")
+        self._last_tab_manual = False
         self._tab_bar.setCurrentIndex(self._TAB_SIMPLE)
         self._tab_bar.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self._tab_bar)
         return frame
 
-    def _is_simple(self) -> bool:
+    def _is_manual(self) -> bool:
         bar = getattr(self, "_tab_bar", None)
-        return bool(bar and bar.currentIndex() == self._TAB_SIMPLE)
+        return bool(bar and bar.currentIndex() == self._TAB_MANUAL)
+
+    def _is_simple(self) -> bool:
+        """Simple tab, or the Manual tab with its toggle on Simple."""
+        bar = getattr(self, "_tab_bar", None)
+        if not bar:
+            return False
+        if bar.currentIndex() == self._TAB_MANUAL:
+            return self._man_simple_btn.isChecked()
+        return bar.currentIndex() == self._TAB_SIMPLE
 
     def _on_tab_changed(self, _index: int) -> None:
+        manual = self._is_manual()
+        self._apply_tab_mode()
+        if manual != self._last_tab_manual:
+            # Pipeline <-> Maya project: the scene info comes from elsewhere
+            self._last_tab_manual = manual
+            self._refresh_scene()
+        else:
+            self._update_output_preview()
+
+    def _on_manual_mode_changed(self, *_):
         self._apply_tab_mode()
         self._update_output_preview()
 
@@ -612,6 +685,72 @@ class PlayblastTool(*_TOOL_BASES):
             w.setVisible(not simple)
         for w in (self._simple_cam_lbl, self._hero_btn):
             w.setVisible(simple)
+        self._manual_box.setVisible(self._is_manual())
+
+    def _build_manual_box(self) -> QWidget:
+        """Manual tab only: the Maya project, and the Simple/Advanced toggle."""
+        self._manual_box = QWidget()
+        lay = QVBoxLayout(self._manual_box)
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+
+        self._project_frame = QFrame(); self._project_frame.setObjectName("fxBlastProject")
+        self._project_frame.setStyleSheet(_S_PROJECT_OK)
+        pl = QVBoxLayout(self._project_frame)
+        pl.setContentsMargins(8, 8, 8, 8); pl.setSpacing(6)
+        top = QHBoxLayout(); top.setSpacing(10)
+        set_btn = QPushButton("Set Project..."); set_btn.setStyleSheet(_S_SMALL_BTN)
+        set_btn.clicked.connect(self._on_set_project)
+        top.addWidget(set_btn); top.addWidget(_lbl("Maya project")); top.addStretch()
+        pl.addLayout(top)
+        self._project_lbl = QLabel("--")
+        self._project_lbl.setWordWrap(True)
+        self._project_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._project_lbl.setStyleSheet(
+            f"font-family: monospace; font-size:11px; color:{_C_VALUE};")
+        pl.addWidget(self._project_lbl)
+        lay.addWidget(self._project_frame)
+
+        row = QHBoxLayout(); row.setSpacing(0)
+        self._man_mode_group = QButtonGroup(self)
+        self._man_simple_btn = QPushButton("Simple")
+        self._man_adv_btn    = QPushButton("Advanced")
+        for b in (self._man_simple_btn, self._man_adv_btn):
+            b.setCheckable(True); b.setStyleSheet(_S_MODE_BTN)
+            self._man_mode_group.addButton(b); row.addWidget(b)
+        self._man_simple_btn.setChecked(True)
+        self._man_mode_group.buttonClicked.connect(self._on_manual_mode_changed)
+        row.addSpacing(10)
+        hint = QLabel("Output goes to the Maya project, named from the workfile.")
+        hint.setStyleSheet(f"font-size:11px; color:{_C_DIM};")
+        row.addWidget(hint); row.addStretch()
+        lay.addLayout(row)
+        lay.addWidget(_hline())
+        return self._manual_box
+
+    def _update_project_box(self) -> None:
+        try:
+            from .maya_bridge import get_project_root, project_is_set
+            root = get_project_root(); ok = project_is_set(root)
+        except Exception:
+            root, ok = "", False
+        self._project_lbl.setText(
+            root if ok else "No project set. Output needs a Maya project.")
+        self._project_frame.setStyleSheet(_S_PROJECT_OK if ok else _S_PROJECT_MISSING)
+
+    def _on_set_project(self) -> None:
+        try:
+            from .maya_bridge import get_project_root, set_project
+            start = get_project_root()
+        except Exception:
+            start = ""
+        path = QFileDialog.getExistingDirectory(self, "Set Maya project", start)
+        if not path:
+            return
+        try:
+            set_project(path)
+        except Exception as exc:
+            self._set_status(f"Could not set project: {exc}", error=True); return
+        self._refresh_scene()
 
     def _build_hero_button(self) -> QPushButton:
         self._hero_btn = QPushButton()
@@ -626,11 +765,11 @@ class PlayblastTool(*_TOOL_BASES):
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
             lay.addWidget(lbl)
-        self._hero_btn.clicked.connect(self._on_playblast)
+        self._hero_btn.clicked.connect(self._on_blast_clicked)
         return self._hero_btn
 
     def _update_hero_sub(self) -> None:
-        if not hasattr(self, "_hero_sub"):
+        if not hasattr(self, "_hero_sub") or self._busy:
             return
         cams = self._blast_cameras() if self._tokens else []
         if self._tokens is None or not cams:
@@ -641,18 +780,48 @@ class PlayblastTool(*_TOOL_BASES):
             f"{version}   \u2022   {cams[0]['label']}   \u2022   "
             f"{self._start_spin.value()}-{self._end_spin.value()}")
 
-    # Both Playblast buttons (Advanced + Simple hero) change together
+    # Both Playblast buttons (Advanced + Simple hero) change together.
+    # While a blast runs they become Stop buttons.
+    _busy = False
+    _stop_requested = False
+
     def _set_blast_enabled(self, enabled: bool) -> None:
+        if self._busy:
+            return                      # the Stop button stays clickable
         self._blast_btn.setEnabled(enabled)
         self._hero_btn.setEnabled(enabled)
 
-    def _set_blast_text(self, text: str) -> None:
-        self._blast_btn.setText(text)
-        idle = text == "Playblast"
-        self._hero_title.setText(text)
-        self._hero_sub.setVisible(idle)
-        if idle:
-            self._update_hero_sub()
+    def _on_blast_clicked(self) -> None:
+        if self._busy:
+            self._stop_requested = True
+            self._progress("Stopping...")
+            return
+        self._on_playblast()
+
+    def _begin_busy(self) -> None:
+        self._busy, self._stop_requested = True, False
+        self._blast_btn.setEnabled(True); self._hero_btn.setEnabled(True)
+        self._blast_btn.setText("\u25a0  Stop"); self._blast_btn.setStyleSheet(_S_STOP)
+        self._blast_btn.setToolTip("Stops before the next camera or layer, and cancels "
+                                   "a movie encode. Press Esc in Maya to stop the "
+                                   "camera being blasted now.")
+        self._hero_title.setText("\u25a0  Stop"); self._hero_btn.setStyleSheet(_S_HERO_STOP)
+        self._hero_sub.setVisible(True)
+
+    def _end_busy(self) -> None:
+        self._busy = False
+        self._blast_btn.setText("Playblast"); self._blast_btn.setStyleSheet(_S_BLAST)
+        self._blast_btn.setToolTip("")
+        self._hero_title.setText("Playblast"); self._hero_btn.setStyleSheet(_S_HERO)
+        self._update_output_preview()
+
+    def _progress(self, text: str) -> None:
+        """Show what the blast is doing now, under Stop and in the footer."""
+        self._hero_sub.setText(f"{text}   (Esc in Maya stops this camera)"
+                               if text.startswith("Blasting") else text)
+        self._status_lbl.setStyleSheet(f"font-size:11px; color:{_C_DIM};")
+        self._status_lbl.setText(text)
+        QApplication.processEvents()
 
     def _build_context_bar(self) -> QWidget:
         """Show / Season / Type / Asset / Task / Scene / Version, as one
@@ -677,6 +846,17 @@ class PlayblastTool(*_TOOL_BASES):
                      f'<b style="color:{_C_CRUMB_VALUE};">{value}</b>')
 
         sep = f'&nbsp;&nbsp;<span style="color:{_C_CRUMB_SEP};">/</span>&nbsp;&nbsp;'
+        if t is not None and t.source == "manual":
+            parts = [
+                '<b style="color:#e0d090;">Out of pipeline</b>',
+                crumb("Project", t.show),
+                crumb("Scene", t.asset_or_shot),
+                (f'<span style="color:{_C_CRUMB_LABEL};">Version</span> '
+                 f'<b style="color:{_C_CRUMB_ACCENT};">{t.version}</b>'),
+            ]
+            self._context_lbl.setText(
+                f'<span style="font-size:13px;">{sep.join(parts)}</span>')
+            return
         if t is None:
             parts = [crumb(lbl, "--") for lbl in
                      ("Show", "Season", "Type/Seq", "Asset/Shot", "Task", "Scene")]
@@ -874,9 +1054,55 @@ class PlayblastTool(*_TOOL_BASES):
             self._fmt_btn_group.addButton(rb, i)
             rb.toggled.connect(self._update_output_preview)
             grid.addWidget(rb, 0, i + 1)
+        mov_lbl = QLabel("Movie"); mov_lbl.setStyleSheet(f"font-size:11px; color:{_C_DIM};")
+        grid.addWidget(mov_lbl, 1, 0)
+        for j, fmt in enumerate(MOVIE_FORMATS):
+            rb = QRadioButton(MOVIE_LABELS[fmt])
+            rb.setStyleSheet(f"font-size:12px; color:{_C_VALUE};")
+            rb.setToolTip("Blasts an image sequence (kept), then encodes it into the movies folder.")
+            self._fmt_btn_group.addButton(rb, len(IMAGE_FORMATS) + j)
+            rb.toggled.connect(self._on_format_changed)
+            grid.addWidget(rb, 1, j + 1)
+
+        # ProRes profiles: only shown while ProRes is picked
+        self._prores_lbl = QLabel("ProRes"); self._prores_lbl.setStyleSheet(f"font-size:11px; color:{_C_DIM};")
+        grid.addWidget(self._prores_lbl, 2, 0)
+        self._prores_group = QButtonGroup(self)
+        self._prores_btns = []
+        for k, (pid, label, _num) in enumerate(PRORES_PROFILES):
+            rb = QRadioButton(label)
+            rb.setStyleSheet(f"font-size:12px; color:{_C_VALUE};")
+            rb.setChecked(pid == DEFAULT_PRORES_PROFILE)
+            self._prores_group.addButton(rb, k)
+            grid.addWidget(rb, 2, k + 1)
+            self._prores_btns.append(rb)
         grid.setColumnStretch(4, 1)
         layout.addLayout(grid)
+        self._on_format_changed()
         return w
+
+    def _selected_format(self) -> str:
+        """jpg / png / png_alpha / h264 / prores"""
+        return _ALL_FORMATS[max(self._fmt_btn_group.checkedId(), 0)]
+
+    def _movie_format(self) -> Optional[str]:
+        f = self._selected_format()
+        return f if f in MOVIE_FORMATS else None
+
+    def _sequence_format(self) -> str:
+        """The image format actually blasted (movies blast a sequence first)."""
+        f = self._selected_format()
+        return MOVIE_SEQUENCE_FORMAT.get(f, f)
+
+    def _prores_profile(self) -> str:
+        return PRORES_PROFILES[max(self._prores_group.checkedId(), 0)][0]
+
+    def _on_format_changed(self, *_):
+        prores = self._selected_format() == "prores"
+        for w in [self._prores_lbl] + self._prores_btns:
+            w.setVisible(prores)
+        if self._tokens is not None:
+            self._update_output_preview()
 
     # ── Note ─────────────────────────────────────────────────────────────────
 
@@ -917,9 +1143,24 @@ class PlayblastTool(*_TOOL_BASES):
         self._disable_filmgate_chk = _chk(
             "Disable Film Gate and Pan/Zoom  (No Gate mode)", checked=True
         )
-        self._hud_chk = _chk("Show HUD overlay  (shot info, frame counter, note)")
         body_layout.addWidget(self._disable_filmgate_chk)
+
+        # Burn-in: one setting for every tab, on by default. Same on the
+        # image sequence and the movie (the movie is encoded from it).
+        self._hud_chk = _chk("Burn-in HUD", checked=True,
+                             tooltip="Burned into the frames, so it is in the sequence and the movie.")
         body_layout.addWidget(self._hud_chk)
+        burn = QGridLayout(); burn.setContentsMargins(20, 0, 0, 0)
+        burn.setHorizontalSpacing(10); burn.setVerticalSpacing(4)
+        self._burn_chks = {}
+        for n, (fid, label) in enumerate(BURN_IN_FIELDS):
+            cb = _chk(label, checked=True)
+            self._burn_chks[fid] = cb
+            burn.addWidget(cb, n // 3, n % 3)
+        burn.setColumnStretch(3, 1)
+        body_layout.addLayout(burn)
+        self._hud_chk.toggled.connect(
+            lambda on: [cb.setEnabled(on) for cb in self._burn_chks.values()])
 
         # VP2 sub-header
         vp2_hdr = QLabel("Viewport 2.0")
@@ -1194,22 +1435,37 @@ class PlayblastTool(*_TOOL_BASES):
     # ══════════════════════════════════════════════════════════════════════════
 
     def _refresh_scene(self) -> None:
+        manual = self._is_manual()
+        if manual:
+            self._update_project_box()
         try:
-            from .maya_bridge import get_scene_tokens
-            self._tokens = get_scene_tokens()
+            if manual:
+                from .maya_bridge import get_manual_tokens
+                self._tokens = get_manual_tokens()
+            else:
+                from .maya_bridge import get_scene_tokens
+                self._tokens = get_scene_tokens()
             self._error_banner.setVisible(False)
         except (ParseError, Exception) as exc:
             self._tokens = None; self._resolver = None
-            self._error_banner.setText(str(exc)); self._error_banner.setVisible(True)
+            msg = str(exc)
+            if not manual and "No scene file is open" not in msg:
+                msg += "\n\nTo blast this scene anyway, use the Manual tab."
+            self._error_banner.setText(msg); self._error_banner.setVisible(True)
+            self._set_context_bar(None)
             self._set_blast_enabled(False); self._output_path_lbl.setText("--")
             self._refresh_btn.setStyleSheet(_S_REFRESH_ERROR)
+            self._ver_tree.clear(); self._update_hero_sub()
+            self._set_status("Could not read this scene - see the message above", error=True)
             return
+        src = self._tokens.source
         self._refresh_btn.setStyleSheet(
-            _S_REFRESH_OK if self._tokens.source == "pipeline" else _S_REFRESH_WARN)
+            _S_REFRESH_WARN if src == "scene path" else _S_REFRESH_OK)
         self._set_status(
-            "Scene info from the pipeline context" if self._tokens.source == "pipeline"
-            else "Scene info from the scene path (no pipeline context for this scene)",
-            error=self._tokens.source != "pipeline")
+            {"pipeline": "Scene info from the pipeline context",
+             "manual":   "Output goes to the Maya project"}.get(
+                src, "Scene info from the scene path (no pipeline context for this scene)"),
+            error=src == "scene path")
         self._cam_resolution_overrides.clear()
         self._cam_res_custom.clear()
         self._cam_follow_rg.clear()
@@ -1297,8 +1553,6 @@ class PlayblastTool(*_TOOL_BASES):
             self._ver_tree.blockSignals(False); return
 
         current_version = self._tokens.version if self._tokens else ""
-        fmt   = IMAGE_FORMATS[self._fmt_btn_group.checkedId()]
-        ext   = FORMAT_EXTENSIONS.get(fmt, fmt)
         notes = self._load_notes(); meta = self._load_meta()
 
         for ver in resolver.existing_versions():
@@ -1306,14 +1560,14 @@ class PlayblastTool(*_TOOL_BASES):
             key      = self._ver_key(ver)
             ver_meta = meta.get(key, {}); note = notes.get(key, "")
 
-            flat_frames = sorted(glob.glob(os.path.join(folder, f"*.{ext}")))
+            flat_frames = _frames_in(folder)       # any format, not just the selected one
             cam_subfolders = []
             try:
                 cam_subfolders = sorted([
                     d for d in os.listdir(folder)
                     if os.path.isdir(os.path.join(folder, d))
                     and not d.startswith("_")
-                    and glob.glob(os.path.join(folder, d, f"*.{ext}"))
+                    and _frames_in(os.path.join(folder, d))
                 ])
             except Exception: pass
 
@@ -1321,7 +1575,7 @@ class PlayblastTool(*_TOOL_BASES):
             if is_multi:
                 all_frames = sorted(
                     f for sf in cam_subfolders
-                    for f in glob.glob(os.path.join(folder, sf, f"*.{ext}"))
+                    for f in _frames_in(os.path.join(folder, sf))
                 )
                 count = len(all_frames)
                 range_str = (f"{_frame_nums(all_frames)[0]}-{_frame_nums(all_frames)[1]}"
@@ -1350,7 +1604,7 @@ class PlayblastTool(*_TOOL_BASES):
             if is_multi:
                 for sf in cam_subfolders:
                     sf_folder = os.path.join(folder, sf)
-                    sf_frames = sorted(glob.glob(os.path.join(sf_folder, f"*.{ext}")))
+                    sf_frames = _frames_in(sf_folder)
                     sf_range  = (f"{_frame_nums(sf_frames)[0]}-{_frame_nums(sf_frames)[1]}"
                                  if sf_frames else "--")
                     child = QTreeWidgetItem(["", sf, sf_range, str(len(sf_frames)),
@@ -1631,7 +1885,7 @@ class PlayblastTool(*_TOOL_BASES):
     def _update_output_preview(self) -> None:
         if self._tokens is None:
             self._output_path_lbl.setText("--"); return
-        fmt = IMAGE_FORMATS[self._fmt_btn_group.checkedId()]
+        fmt = self._sequence_format()
         try:
             self._resolver = build_resolver(
                 self._tokens,
@@ -1665,6 +1919,13 @@ class PlayblastTool(*_TOOL_BASES):
             res = self._cam_res(cam["label"])
             tag = f"  [{res[0]}x{res[1]}]"
             lines.append(f"{folder}{tag}")
+        movie_fmt = self._movie_format()
+        if movie_fmt and cams:
+            from .movie import movie_path
+            for cam in cams:
+                lines.append("Movie: " + movie_path(
+                    self._tokens.movies_root, self._resolver.output_basename,
+                    _cam_slug(cam["label"]), movie_fmt))
         self._set_output_paths(lines or [self._resolver.output_folder])
 
         self._set_blast_enabled(bool(cams))
@@ -1692,7 +1953,10 @@ class PlayblastTool(*_TOOL_BASES):
     def _blast_settings(self) -> dict:
         anam = self._ana_chk.isChecked()
         return dict(
-            fmt     = IMAGE_FORMATS[self._fmt_btn_group.checkedId()],
+            fmt     = self._sequence_format(),
+            movie   = self._movie_format(),
+            prores  = self._prores_profile(),
+            burn    = {fid for fid, cb in self._burn_chks.items() if cb.isChecked()},
             anam    = anam,
             squeeze = self._squeeze_combo.currentData() if anam else None,
             start   = self._start_spin.value(),
@@ -1722,17 +1986,32 @@ class PlayblastTool(*_TOOL_BASES):
     def _blast_one(self, cam: dict, slug: str, s: dict, fps: float,
                    hud_camera_name: Optional[str] = None,
                    panel: Optional[str] = None, offscreen: bool = True) -> str:
-        """One blast through one camera into <version folder>/<slug>/.
-        Same steps as before: film gate, anamorphic, HUD, then restore."""
+        """One blast through one camera into <version folder>/<slug>/:
+        film gate, anamorphic, burn-in HUD, blast, restore -- then the movie
+        encode when a movie format is picked. Raises _Stopped when the
+        artist stopped it (Esc in Maya, or Stop before the encode)."""
         from .maya_bridge import (
             calculate_anamorphic_blast_size, configure_anamorphic,
             disable_film_gate_pan_zoom, execute_playblast,
             restore_camera_settings, restore_film_gate_pan_zoom,
             setup_hud, teardown_hud,
         )
-        cam_w, cam_h = self._cam_res(cam["label"])
+        deliver_w, deliver_h = self._cam_res(cam["label"])
+        cam_w, cam_h = deliver_w, deliver_h
         if s["anam"] and s["squeeze"] is not None:
             cam_w, cam_h = calculate_anamorphic_blast_size(cam_w, cam_h, s["squeeze"])
+
+        cam_folder = os.path.join(self._resolver.output_folder, slug)
+        # The per-camera/per-layer subfolder (slug) already disambiguates
+        # these frames -- repeating it in the filename too just inflates
+        # the path length for no benefit, and can tip long asset/descriptor
+        # names over Windows' 260-char path limit ("Failed to open output
+        # file" on every frame). The version folder + subfolder name is
+        # already a unique, readable location without it.
+        stem        = self._resolver.output_basename
+        frames_stem = os.path.join(cam_folder, stem)
+        burn_in     = s["use_hud"] and bool(s["burn"])
+        before      = {f: os.path.getmtime(f) for f in _frames_in(cam_folder)}
 
         anam_snap = gate_snap = hud_snap = None
         try:
@@ -1740,32 +2019,24 @@ class PlayblastTool(*_TOOL_BASES):
                 gate_snap = disable_film_gate_pan_zoom(cam["shape"])
             if s["anam"] and s["squeeze"] is not None:
                 anam_snap = configure_anamorphic(cam["shape"], s["squeeze"])
-            if s["use_hud"]:
+            if burn_in:
                 hud_snap = setup_hud(
-                    tokens=self._tokens, version=self._resolver.version,
                     camera_name=hud_camera_name or cam["label"],
                     camera_shape=cam["shape"],
-                    width=cam_w, height=cam_h, fps=fps, note=s["note"],
+                    width=deliver_w, height=deliver_h, fps=fps,
                     start_frame=s["start"], end_frame=s["end"],
+                    fields=s["burn"],
                 )
-            cam_folder = os.path.join(self._resolver.output_folder, slug)
-            # The per-camera/per-layer subfolder (slug) already disambiguates
-            # these frames -- repeating it in the filename too just inflates
-            # the path length for no benefit, and can tip long asset/descriptor
-            # names over Windows' 260-char path limit ("Failed to open output
-            # file" on every frame). The version folder + subfolder name is
-            # already a unique, readable location without it.
-            stem = self._resolver.output_basename
-            return execute_playblast(
+            folder = execute_playblast(
                 resolver=self._resolver, camera=cam["transform"],
                 width=cam_w, height=cam_h, image_format=s["fmt"],
-                frame_padding=FRAME_PADDING, show_ornaments=s["use_hud"],
+                frame_padding=FRAME_PADDING, show_ornaments=burn_in,
                 start_frame=s["start"], end_frame=s["end"],
-                output_path_override=os.path.join(cam_folder, stem),
+                output_path_override=frames_stem,
                 panel=panel, offscreen=offscreen,
             )
         finally:
-            if s["use_hud"] and hud_snap:
+            if hud_snap:
                 try: teardown_hud(hud_snap)
                 except Exception: pass
             if gate_snap:
@@ -1775,8 +2046,42 @@ class PlayblastTool(*_TOOL_BASES):
                 try: restore_camera_settings(cam["shape"], anam_snap)
                 except Exception: pass
 
+        # Esc in Maya ends a playblast early without an error. Every frame of
+        # the range is new or rewritten after a full blast; fewer = stopped.
+        written = sum(1 for f in _frames_in(cam_folder)
+                      if before.get(f) != os.path.getmtime(f))
+        if written < s["end"] - s["start"] + 1:
+            raise _Stopped()
+
+        if s["movie"]:
+            if self._stop_requested:
+                raise _Stopped()
+            self._encode_movie(frames_stem, slug, s, fps)
+        return folder
+
+    def _encode_movie(self, frames_stem: str, slug: str, s: dict, fps: float) -> None:
+        from .movie import MovieCancelled, MovieError, build_args, encode, movie_path
+        out = movie_path(self._tokens.movies_root, self._resolver.output_basename,
+                         slug, s["movie"])
+        self._progress(f"Encoding movie \u2014 {slug}...")
+        args = build_args(frames_stem, FORMAT_EXTENSIONS[s["fmt"]], s["start"], fps,
+                          out, s["movie"], s["prores"],
+                          squeeze=s["squeeze"] if s["anam"] else None)
+
+        def keep_waiting() -> bool:
+            QApplication.processEvents()          # keeps Stop clickable
+            return not self._stop_requested
+        try:
+            encode(args, keep_waiting)
+        except MovieCancelled:
+            raise _Stopped()
+        except MovieError as exc:
+            raise RuntimeError(f"Movie encode failed for {slug}.\n\n{exc}") from exc
+        self._movies.append(out)
+
     def _after_blast(self, last_folder: Optional[str], s: dict, fps: float,
-                     cams: list[dict], layers: Optional[list[str]] = None) -> None:
+                     cams: list[dict], layers: Optional[list[str]] = None,
+                     stopped: bool = False) -> None:
         # Frames live in the camera/layer subfolder, not the version folder
         blast_folder = last_folder or self._resolver.output_folder
         self._blast_btn.setStyleSheet(_S_BLAST_DONE)
@@ -1791,6 +2096,7 @@ class PlayblastTool(*_TOOL_BASES):
             entry = {
                 "frame_range": [s["start"], s["end"]], "fps": fps,
                 "resolution": list(first_res), "format": s["fmt"],
+                "movie": s["movie"],
                 "cameras": [c["label"] for c in cams],
             }
             if layers:
@@ -1800,9 +2106,14 @@ class PlayblastTool(*_TOOL_BASES):
         except Exception: pass
 
         what = ", ".join(layers) if layers else ", ".join(c["label"] for c in cams)
-        self._set_status(f"Done  [{what}]  \u2192  {self._resolver.output_folder}")
+        movies = f"  + {len(self._movies)} movie(s)" if self._movies else ""
+        if stopped:
+            self._set_status(f"Stopped - finished: [{what}]{movies}", error=True)
+        else:
+            self._set_status(f"Done  [{what}]{movies}  \u2192  {self._resolver.output_folder}")
         self._refresh_version_list()
-        self._launch_rv(blast_folder)   # fresh blast -> open it in RV automatically
+        if not stopped:
+            self._launch_rv(blast_folder)   # fresh blast -> open it in RV automatically
 
     def _on_playblast(self) -> None:
         if self._tokens is None or self._resolver is None: return
@@ -1830,27 +2141,35 @@ class PlayblastTool(*_TOOL_BASES):
         s        = self._blast_settings()
         is_multi = len(cams) > 1
 
-        self._set_blast_enabled(False)
-        QApplication.processEvents()
-
-        last_folder = None
+        self._begin_busy(); self._movies = []
+        done, last_folder, stopped, failed, fps = [], None, False, False, 24.0
         try:
             from .maya_bridge import get_fps
             fps = get_fps()
             for idx, cam in enumerate(cams):
-                label = (f"Blasting {idx+1}/{len(cams)} \u2014 {cam['label']}..."
-                         if is_multi else "Blasting...")
-                self._set_blast_text(label); QApplication.processEvents()
-                last_folder = self._blast_one(cam, _cam_slug(cam["label"]), s, fps,
-                                              panel=panel)
-            self._after_blast(last_folder, s, fps, cams)
-
+                if self._stop_requested:
+                    stopped = True; break
+                self._progress(f"Blasting {idx+1}/{len(cams)} \u2014 {cam['label']}..."
+                               if is_multi else f"Blasting \u2014 {cam['label']}...")
+                try:
+                    last_folder = self._blast_one(cam, _cam_slug(cam["label"]), s, fps,
+                                                  panel=panel)
+                except _Stopped:
+                    stopped = True; break
+                done.append(cam)
         except Exception as exc:
+            failed = True
             QMessageBox.critical(self, "Playblast failed", f"The playblast did not complete:\n\n{exc}")
             self._set_status(f"Blast failed: {exc}", error=True)
         finally:
-            self._set_blast_text("Playblast"); self._set_blast_enabled(True)
-            self._update_output_preview()
+            self._end_busy()
+
+        if failed:
+            return
+        if done:
+            self._after_blast(last_folder, s, fps, done, stopped=stopped)
+        elif stopped:
+            self._set_status("Stopped - nothing finished", error=True)
 
     # ── Render-layer stepping ─────────────────────────────────────────────────
     # Each layer is switched in its own event-loop step, then blasted after a
@@ -1883,18 +2202,20 @@ class PlayblastTool(*_TOOL_BASES):
             orig_cam=get_panel_camera(panel),
             s=self._blast_settings(), fps=get_fps(),
             settle=self._settle_spin.value(),
-            done=[], errors=[], last=None,
+            done=[], errors=[], last=None, stopped=False,
         )
-        self._set_blast_enabled(False)
+        self._begin_busy(); self._movies = []
         self._set_status(f"Stepping {len(jobs)} layers through {panel}...")
         QTimer.singleShot(0, self._layer_step_switch)
 
     def _layer_step_switch(self) -> None:
         lb = self._lb
-        if lb["i"] >= len(lb["jobs"]):
+        if self._stop_requested:
+            lb["stopped"] = True
+        if lb["stopped"] or lb["i"] >= len(lb["jobs"]):
             self._layer_finish(); return
         layer, cam = lb["jobs"][lb["i"]]
-        self._set_blast_text(f"Layer {lb['i']+1}/{len(lb['jobs'])} \u2014 {layer}...")
+        self._progress(f"Blasting layer {lb['i']+1}/{len(lb['jobs'])} \u2014 {layer}...")
         try:
             from .maya_bridge import set_panel_camera, switch_render_layer
             switch_render_layer(layer)
@@ -1919,6 +2240,8 @@ class PlayblastTool(*_TOOL_BASES):
                 panel=lb["panel"], offscreen=False,
             )
             lb["done"].append((layer, cam))
+        except _Stopped:
+            lb["stopped"] = True
         except Exception as exc:
             lb["errors"].append(f"{layer}: {exc}")
         lb["i"] += 1
@@ -1932,11 +2255,14 @@ class PlayblastTool(*_TOOL_BASES):
             set_panel_camera(lb["panel"], lb["orig_cam"])
         except Exception:
             pass
-        self._set_blast_text("Playblast"); self._set_blast_enabled(True)
+        self._end_busy()
         if lb["done"]:
             self._after_blast(lb["last"], lb["s"], lb["fps"],
                               [c for _, c in lb["done"]],
-                              layers=[l for l, _ in lb["done"]])
+                              layers=[l for l, _ in lb["done"]],
+                              stopped=lb["stopped"])
+        elif lb["stopped"]:
+            self._set_status("Stopped - nothing finished", error=True)
         if lb["errors"]:
             QMessageBox.warning(self, "Render layer blast",
                                 "Some layers had problems:\n\n" + "\n".join(lb["errors"]))
