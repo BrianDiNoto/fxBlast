@@ -21,7 +21,7 @@ try:
         QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStyle,
         QStyledItemDelegate, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     )
-    from PySide2.QtCore import Qt, QTimer
+    from PySide2.QtCore import QPoint, Qt, QTimer
     from PySide2.QtGui import QColor, QFont, QFontMetrics, QIcon
 except ImportError:
     from PySide6.QtWidgets import (
@@ -32,7 +32,7 @@ except ImportError:
         QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStyle,
         QStyledItemDelegate, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     )
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import QPoint, Qt, QTimer
     from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon
 
 try:
@@ -471,9 +471,15 @@ class PlayblastTool(*_TOOL_BASES):
             cls._instance = None
 
         inst = cls()
-        try:
-            inst.show(dockable=True, floating=True)
-        except TypeError:
+        width, height = inst._locked_w, inst.wanted_height()
+        for kwargs in (dict(width=width, height=height, widthSizingProperty="fixed"),
+                       dict(width=width, height=height), {}):
+            try:
+                inst.show(dockable=True, floating=True, **kwargs)
+                break
+            except TypeError:
+                continue
+        else:
             inst.show()
         cls._instance = inst
         # After Maya has wrapped the widget in its workspace control
@@ -506,7 +512,8 @@ class PlayblastTool(*_TOOL_BASES):
         super().closeEvent(event)
 
     def _setup_window(self) -> None:
-        self.setWindowTitle("fxBlast")
+        from . import __version__
+        self.setWindowTitle(f"fxBlast {__version__}")
         self.setObjectName("fxBlast")   # workspace control = "fxBlastWorkspaceControl"
         self.setMinimumWidth(460)
         self._apply_window_icon()
@@ -573,9 +580,10 @@ class PlayblastTool(*_TOOL_BASES):
             "available, or the scene is outside the task Maya was launched in)."
             "\nRed = could not read this scene.")
         self._refresh_btn.clicked.connect(self._refresh_scene)
-        root.addWidget(self._build_manual_box())
 
+        # Frame range + anamorphic: first line on every tab
         root.addWidget(self._build_scene_section())
+        root.addWidget(self._build_manual_box())
         # Advanced-only widgets are kept so the tab switch can show/hide them
         self._cam_hline      = _hline()
         self._cam_section    = self._build_camera_section()
@@ -587,6 +595,7 @@ class PlayblastTool(*_TOOL_BASES):
         root.addWidget(self._build_format_section())
         root.addWidget(_hline())
         root.addWidget(self._build_note_section())
+        root.addWidget(self._build_burn_in_section())
         self._po_section = self._build_playblast_options_section()
         root.addWidget(self._po_section)
 
@@ -700,6 +709,7 @@ class PlayblastTool(*_TOOL_BASES):
         self._manual_box = QWidget()
         lay = QVBoxLayout(self._manual_box)
         lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        lay.addWidget(_hline())
 
         self._project_frame = QFrame(); self._project_frame.setObjectName("fxBlastProject")
         self._project_frame.setStyleSheet(_S_PROJECT_OK)
@@ -864,18 +874,41 @@ class PlayblastTool(*_TOOL_BASES):
             self._locked_w = need
             self.setFixedWidth(need)
             self._resize_workspace_control(width=need)
+            if self.isVisible():
+                self._lock_floating_window()
 
-    def fit_initial_size(self) -> None:
-        """Open tall enough to show the whole tab (capped to the screen), so
-        the bottom is never cut off."""
-        self._lock_width()
+    def wanted_height(self) -> int:
+        """Tall enough to show the whole tab, capped to 90% of the screen."""
         chrome = self.sizeHint().height() - self._scroll.sizeHint().height()
         want = chrome + self._content.sizeHint().height() + 4
-        screen = QApplication.desktop().availableGeometry(self) \
-            if hasattr(QApplication, "desktop") else self.screen().availableGeometry()
-        h = min(want, int(screen.height() * 0.9))
+        try:
+            screen = QApplication.desktop().availableGeometry(self)
+        except Exception:
+            screen = QApplication.primaryScreen().availableGeometry()
+        return min(want, int(screen.height() * 0.9))
+
+    def fit_initial_size(self) -> None:
+        """Open at the full tab height, so the bottom is never cut off."""
+        self._lock_width()
+        h = self.wanted_height()
         self.resize(self.width(), h)
         self._resize_workspace_control(height=h)
+        self._lock_floating_window()
+
+    def _lock_floating_window(self) -> None:
+        """Maya's floating window around the tool ignores the tool's own fixed
+        width: lock the window itself (never Maya's main window when docked)."""
+        try:
+            import maya.cmds as cmds
+            if not cmds.workspaceControl("fxBlastWorkspaceControl", query=True, floating=True):
+                return
+        except Exception:
+            pass
+        win = self.window()
+        if win is None or win is self:
+            return
+        border = self.mapTo(win, QPoint(0, 0)).x()
+        win.setFixedWidth(self._locked_w + 2 * border)
 
     def _resize_workspace_control(self, width: Optional[int] = None,
                                   height: Optional[int] = None) -> None:
@@ -1201,22 +1234,6 @@ class PlayblastTool(*_TOOL_BASES):
         )
         body_layout.addWidget(self._disable_filmgate_chk)
 
-        # Burn-in: one setting for every tab, on by default. Same on the
-        # image sequence and the movie (the movie is encoded from it).
-        self._hud_chk = _chk("Burn-in HUD", checked=True,
-                             tooltip="Burned into the frames, so it is in the sequence and the movie.")
-        body_layout.addWidget(self._hud_chk)
-        burn = QGridLayout(); burn.setContentsMargins(20, 0, 0, 0)
-        burn.setHorizontalSpacing(10); burn.setVerticalSpacing(4)
-        self._burn_chks = {}
-        for n, (fid, label) in enumerate(BURN_IN_FIELDS):
-            cb = _chk(label, checked=True)
-            self._burn_chks[fid] = cb
-            burn.addWidget(cb, n // 3, n % 3)
-        burn.setColumnStretch(3, 1)
-        body_layout.addLayout(burn)
-        self._hud_chk.toggled.connect(
-            lambda on: [cb.setEnabled(on) for cb in self._burn_chks.values()])
 
         # VP2 sub-header
         vp2_hdr = QLabel("Viewport 2.0")
@@ -1316,6 +1333,55 @@ class PlayblastTool(*_TOOL_BASES):
         layout.addWidget(body)
         self._po_body = body
         return container
+
+    def _build_burn_in_section(self) -> QWidget:
+        """Burn-in: its own twirl-down, on every tab. One setting for all tabs,
+        on by default; burned into the frames, so the movie has it too."""
+        container = QWidget()
+        layout    = QVBoxLayout(container)
+        layout.setContentsMargins(0, 2, 0, 2); layout.setSpacing(2)
+        self._burn_toggle = QPushButton()
+        self._burn_toggle.setCheckable(True)
+        self._burn_toggle.setStyleSheet(_S_TWIRL)
+        layout.addWidget(self._burn_toggle)
+
+        self._burn_body = QWidget()
+        bl = QVBoxLayout(self._burn_body)
+        bl.setContentsMargins(8, 6, 0, 4); bl.setSpacing(6)
+        self._hud_chk = _chk("Burn-in HUD", checked=True,
+                             tooltip="Burned into the frames, so it is in the sequence and the movie.")
+        bl.addWidget(self._hud_chk)
+        grid = QGridLayout(); grid.setContentsMargins(20, 0, 0, 0)
+        grid.setHorizontalSpacing(10); grid.setVerticalSpacing(4)
+        self._burn_chks = {}
+        for n, (fid, label) in enumerate(BURN_IN_FIELDS):
+            cb = _chk(label, checked=True)
+            self._burn_chks[fid] = cb
+            grid.addWidget(cb, n // 3, n % 3)
+        grid.setColumnStretch(3, 1)
+        bl.addLayout(grid)
+        layout.addWidget(self._burn_body)
+
+        def on_hud(on):
+            for cb in self._burn_chks.values():
+                cb.setEnabled(on)
+            self._update_burn_title()
+        self._hud_chk.toggled.connect(on_hud)
+        for cb in self._burn_chks.values():
+            cb.toggled.connect(self._update_burn_title)
+        self._burn_toggle.toggled.connect(self._on_burn_toggle)
+        self._on_burn_toggle(False)
+        return container
+
+    def _update_burn_title(self, *_):
+        arrow = "\u25bc" if self._burn_toggle.isChecked() else "\u25b6"
+        n = sum(cb.isChecked() for cb in self._burn_chks.values())
+        state = f"on, {n} of {len(self._burn_chks)} fields" if self._hud_chk.isChecked() else "off"
+        self._burn_toggle.setText(f"{arrow}  Burn-in  ({state})")
+
+    def _on_burn_toggle(self, expanded: bool) -> None:
+        self._burn_body.setVisible(expanded)
+        self._update_burn_title()
 
     def _on_po_toggle(self, expanded: bool) -> None:
         self._po_body.setVisible(expanded)
@@ -2069,7 +2135,14 @@ class PlayblastTool(*_TOOL_BASES):
         stem        = self._resolver.output_basename
         frames_stem = os.path.join(cam_folder, stem)
         burn_in     = s["use_hud"] and bool(s["burn"])
-        before      = {f: os.path.getmtime(f) for f in _frames_in(cam_folder)}
+        ext         = FORMAT_EXTENSIONS[s["fmt"]]
+        expected    = [f"{frames_stem}.{n:0{FRAME_PADDING}d}.{ext}"
+                       for n in range(s["start"], s["end"] + 1)]
+        # The artist already agreed to overwrite: clear this range first, so
+        # afterwards every frame on disk is from this blast.
+        for f in expected:
+            if os.path.isfile(f):
+                os.remove(f)
 
         anam_snap = gate_snap = hud_snap = None
         try:
@@ -2104,16 +2177,17 @@ class PlayblastTool(*_TOOL_BASES):
                 try: restore_camera_settings(cam["shape"], anam_snap)
                 except Exception: pass
 
-        # Esc in Maya ends a playblast early without an error. Every frame of
-        # the range is new or rewritten after a full blast; fewer = stopped.
-        written = sum(1 for f in _frames_in(cam_folder)
-                      if before.get(f) != os.path.getmtime(f))
-        if written < s["end"] - s["start"] + 1:
-            raise _Stopped()
+        # Esc in Maya ends a playblast early without an error: frames missing
+        written = sum(1 for f in expected if os.path.isfile(f))
+        print(f"[fxBlast] {slug}: {written}/{len(expected)} frames written")
+        if written < len(expected):
+            missing = next(f for f in expected if not os.path.isfile(f))
+            print(f"[fxBlast] first missing frame: {missing}")
+            raise _Stopped(f"{written} of {len(expected)} frames written")
 
         if s["movie"]:
             if self._stop_requested:
-                raise _Stopped()
+                raise _Stopped("Stop pressed")
             self._encode_movie(frames_stem, slug, s, fps)
         return folder
 
@@ -2132,7 +2206,7 @@ class PlayblastTool(*_TOOL_BASES):
         try:
             encode(args, keep_waiting)
         except MovieCancelled:
-            raise _Stopped()
+            raise _Stopped("movie encode stopped")
         except MovieError as exc:
             raise RuntimeError(f"Movie encode failed for {slug}.\n\n{exc}") from exc
         self._movies.append(out)
@@ -2201,6 +2275,7 @@ class PlayblastTool(*_TOOL_BASES):
 
         self._begin_busy(); self._movies = []
         done, last_folder, stopped, failed, fps = [], None, False, False, 24.0
+        stop_reason = "Stop pressed"
         try:
             from .maya_bridge import get_fps
             fps = get_fps()
@@ -2212,8 +2287,8 @@ class PlayblastTool(*_TOOL_BASES):
                 try:
                     last_folder = self._blast_one(cam, _cam_slug(cam["label"]), s, fps,
                                                   panel=panel)
-                except _Stopped:
-                    stopped = True; break
+                except _Stopped as exc:
+                    stopped, stop_reason = True, str(exc) or "Stop pressed"; break
                 done.append(cam)
         except Exception as exc:
             failed = True
@@ -2227,7 +2302,7 @@ class PlayblastTool(*_TOOL_BASES):
         if done:
             self._after_blast(last_folder, s, fps, done, stopped=stopped)
         elif stopped:
-            self._set_status("Stopped - nothing finished", error=True)
+            self._set_status(f"Stopped - nothing finished ({stop_reason})", error=True)
 
     # ── Render-layer stepping ─────────────────────────────────────────────────
     # Each layer is switched in its own event-loop step, then blasted after a
@@ -2298,8 +2373,9 @@ class PlayblastTool(*_TOOL_BASES):
                 panel=lb["panel"], offscreen=False,
             )
             lb["done"].append((layer, cam))
-        except _Stopped:
+        except _Stopped as exc:
             lb["stopped"] = True
+            lb["reason"]  = str(exc) or "Stop pressed"
         except Exception as exc:
             lb["errors"].append(f"{layer}: {exc}")
         lb["i"] += 1
@@ -2320,7 +2396,8 @@ class PlayblastTool(*_TOOL_BASES):
                               layers=[l for l, _ in lb["done"]],
                               stopped=lb["stopped"])
         elif lb["stopped"]:
-            self._set_status("Stopped - nothing finished", error=True)
+            self._set_status(f"Stopped - nothing finished ({lb.get('reason', 'Stop pressed')})",
+                             error=True)
         if lb["errors"]:
             QMessageBox.warning(self, "Render layer blast",
                                 "Some layers had problems:\n\n" + "\n".join(lb["errors"]))
@@ -2625,6 +2702,7 @@ class PlayblastTool(*_TOOL_BASES):
             if cmds.workspaceControl(ctrl, query=True, exists=True):
                 cmds.workspaceControl(ctrl, edit=True, floating=True)
                 self._set_status("")
+                QTimer.singleShot(0, self._lock_floating_window)
         except Exception as exc:
             self._set_status(f"Undock error: {exc}", error=True)
 

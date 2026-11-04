@@ -317,11 +317,11 @@ def setup_hud(
         line2.append(f"{int(fps)}fps" if fps == int(fps) else f"{fps}fps")
 
     if line1:
-        _add_hud("FXpblast_line1", section=7, block=0, label="   ".join(line1))
+        _add_hud("FXpblast_line1", section=7, label="   ".join(line1))
     if line2:
-        _add_hud("FXpblast_line2", section=7, block=1, label="   ".join(line2))
+        _add_hud("FXpblast_line2", section=7, label="   ".join(line2))
     if "range" in fields:
-        _add_hud("FXpblast_frame", section=9, block=0, label="",
+        _add_hud("FXpblast_frame", section=9, label="",
                  command=_frame_counter_cmd(start_frame, end_frame), attach=True)
 
     return snapshot
@@ -348,12 +348,22 @@ def teardown_hud(snapshot: Optional[dict] = None) -> None:
 def _add_hud(
     hud_id:  str,
     section: int,
-    block:   int,
     label:   str,
     command: str  = "",
     attach:  bool = False,
 ) -> None:
-    """Create a single HUD element and register it for cleanup."""
+    """Create a single HUD element and register it for cleanup.
+
+    The block is the section's next free one: Maya's own HUDs (e.g. camera
+    names in section 7) keep their block even while hidden, and creating
+    an element on a taken block fails."""
+    try:
+        if cmds.headsUpDisplay(hud_id, exists=True):
+            cmds.headsUpDisplay(hud_id, remove=True)
+        block = cmds.headsUpDisplay(nextFreeBlock=section)
+    except Exception as exc:
+        print(f"[fxBlast] burn-in: no free HUD block in section {section}: {exc}")
+        return
     kwargs = dict(
         section       = section,
         block         = block,
@@ -366,12 +376,10 @@ def _add_hud(
         kwargs["command"]         = command
         kwargs["attachToRefresh"] = attach
     try:
-        if cmds.headsUpDisplay(hud_id, exists=True):
-            cmds.headsUpDisplay(hud_id, remove=True)
         cmds.headsUpDisplay(hud_id, **kwargs)
         _ACTIVE_HUD_IDS.append(hud_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[fxBlast] burn-in: could not add {hud_id}: {exc}")
 
 
 def _frame_counter_cmd(start_frame: int, end_frame: int) -> str:
@@ -439,21 +447,39 @@ def execute_playblast(
     else:
         _set_viewport_camera(camera)
 
-    cmds.playblast(
-        filename       = blast_path,
-        format         = "image",
-        compression    = compression,
-        widthHeight    = (width, height),
-        percent        = 100,
-        quality        = 100,
-        startTime      = start_frame,
-        endTime        = end_frame,
-        forceOverwrite = True,
-        framePadding   = frame_padding,
-        viewer         = False,
-        showOrnaments  = show_ornaments,
-        offScreen      = offscreen,
-    )
+    # The burn-in only shows if the panel's own HUD display is on
+    # (viewport menu Display > Heads Up Display). Turn it on, then restore.
+    hud_panel = panel or get_active_model_panel()
+    hud_was   = None
+    if show_ornaments and hud_panel:
+        try:
+            hud_was = cmds.modelEditor(hud_panel, query=True, hud=True)
+            cmds.modelEditor(hud_panel, edit=True, hud=True)
+        except Exception as exc:
+            print(f"[fxBlast] burn-in: could not turn on HUD in {hud_panel}: {exc}")
+
+    print(f"[fxBlast] playblast {blast_path}.####.{ext}  {start_frame}-{end_frame}  "
+          f"{width}x{height}  panel={hud_panel}  ornaments={show_ornaments}")
+    try:
+        cmds.playblast(
+            filename       = blast_path,
+            format         = "image",
+            compression    = compression,
+            widthHeight    = (width, height),
+            percent        = 100,
+            quality        = 100,
+            startTime      = start_frame,
+            endTime        = end_frame,
+            forceOverwrite = True,
+            framePadding   = frame_padding,
+            viewer         = False,
+            showOrnaments  = show_ornaments,
+            offScreen      = offscreen,
+        )
+    finally:
+        if hud_was is False:
+            try: cmds.modelEditor(hud_panel, edit=True, hud=False)
+            except Exception: pass
 
     return result_folder
 

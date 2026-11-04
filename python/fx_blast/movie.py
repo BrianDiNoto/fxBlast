@@ -133,6 +133,7 @@ def encode(
     """
     cmd = ffmpeg_prefix() + args
     out_path = args[-1]
+    print("[fxBlast] ffmpeg: " + subprocess.list2cmdline(cmd))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     # stderr to a file, not a pipe: a full pipe would stall ffmpeg
@@ -153,6 +154,8 @@ def encode(
 
         err.seek(0)
         detail = err.read().decode("utf-8", "replace").strip()[-1500:]
+        print(f"[fxBlast] ffmpeg exit {proc.returncode}; movie exists: "
+              f"{os.path.isfile(out_path)}" + (f"\n{detail}" if detail else ""))
         if proc.returncode != 0:
             raise MovieError(
                 f"ffmpeg failed (exit code {proc.returncode}):\n\n{detail or 'no output'}")
