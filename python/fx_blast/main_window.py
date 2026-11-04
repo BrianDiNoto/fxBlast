@@ -45,7 +45,8 @@ from .config import (
     ANAMORPHIC_SQUEEZE_FACTORS, BURN_IN_FIELDS, DEFAULT_FORMAT,
     DEFAULT_PRORES_PROFILE, DEFAULT_RESOLUTION, DEFAULT_SQUEEZE_FACTOR,
     FORMAT_EXTENSIONS, FORMAT_LABELS, FRAME_PADDING, IMAGE_FORMATS,
-    MOVIE_FORMATS, MOVIE_LABELS, MOVIE_SEQUENCE_FORMAT, PRORES_PROFILES, RV_PATH,
+    MOVIE_FORMATS, MOVIE_LABELS, MOVIE_SEQUENCE_FORMAT, MOVIE_TOOLTIPS,
+    PRORES_PROFILES, RV_PATH,
 )
 from .scene_parser import ParseError, SceneTokens
 from .resolver import OutputResolver, ResolveError, build_resolver
@@ -475,6 +476,8 @@ class PlayblastTool(*_TOOL_BASES):
         except TypeError:
             inst.show()
         cls._instance = inst
+        # After Maya has wrapped the widget in its workspace control
+        QTimer.singleShot(0, inst.fit_initial_size)
         return inst
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -535,6 +538,15 @@ class PlayblastTool(*_TOOL_BASES):
         outer.addWidget(self._build_context_bar())
         outer.addWidget(self._build_tab_bar())
 
+        # Refresh sits outside the scroll area, so it is in the same place on
+        # every tab (a scroll bar or the error banner can't move it).
+        refresh_row = QHBoxLayout()
+        refresh_row.setContentsMargins(12, 10, 12, 0)
+        self._refresh_btn = QPushButton("Refresh scene")
+        self._refresh_btn.setStyleSheet(_S_REFRESH)
+        refresh_row.addWidget(self._refresh_btn)
+        outer.addLayout(refresh_row)
+
         # Sections live in a scroll area so opening a panel (e.g. render
         # layers) never squashes the rest - the window scrolls instead.
         content = QWidget()
@@ -547,6 +559,7 @@ class PlayblastTool(*_TOOL_BASES):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(content)
         outer.addWidget(scroll)
+        self._scroll, self._content = scroll, content
 
         self._error_banner = QLabel()
         self._error_banner.setStyleSheet(_S_ERROR)
@@ -554,15 +567,12 @@ class PlayblastTool(*_TOOL_BASES):
         self._error_banner.setVisible(False)
         root.addWidget(self._error_banner)
 
-        self._refresh_btn = QPushButton("Refresh scene")
-        self._refresh_btn.setStyleSheet(_S_REFRESH)
         self._refresh_btn.setToolTip(
             "Green = refreshed from the pipeline context.\n"
             "Yellow = refreshed from the scene path (pipeline context not "
             "available, or the scene is outside the task Maya was launched in)."
             "\nRed = could not read this scene.")
         self._refresh_btn.clicked.connect(self._refresh_scene)
-        root.addWidget(self._refresh_btn)
         root.addWidget(self._build_manual_box())
 
         root.addWidget(self._build_scene_section())
@@ -573,8 +583,6 @@ class PlayblastTool(*_TOOL_BASES):
         root.addWidget(self._cam_hline)
         root.addWidget(self._cam_section)
         root.addWidget(self._layers_section)
-        root.addWidget(_hline())
-        root.addWidget(self._build_anamorphic_section())
         root.addWidget(_hline())
         root.addWidget(self._build_format_section())
         root.addWidget(_hline())
@@ -639,7 +647,7 @@ class PlayblastTool(*_TOOL_BASES):
         self._tab_bar = QTabBar()
         self._tab_bar.setExpanding(True)
         self._tab_bar.setDrawBase(False)
-        for name in ("Simple", "Advanced", "Manual"):
+        for name in ("Simple", "Advanced", "Off Pipe"):
             self._tab_bar.addTab(name)
         self._tab_bar.setTabToolTip(
             self._TAB_MANUAL, "Blast a scene that is not in the pipeline, into the Maya project")
@@ -681,7 +689,7 @@ class PlayblastTool(*_TOOL_BASES):
         widgets, so frame range, format, note etc. never go out of sync."""
         simple = self._is_simple()
         for w in (self._cam_hline, self._cam_section, self._layers_section,
-                  self._po_section, self._blast_row, self._versions_section):
+                  self._po_section, self._blast_row):
             w.setVisible(not simple)
         for w in (self._simple_cam_lbl, self._hero_btn):
             w.setVisible(simple)
@@ -835,10 +843,54 @@ class PlayblastTool(*_TOOL_BASES):
         layout.setContentsMargins(12, 9, 12, 9)
         self._context_lbl = QLabel()
         self._context_lbl.setTextFormat(Qt.RichText)
-        self._context_lbl.setWordWrap(True)
+        self._context_lbl.setWordWrap(False)     # one line; the window widens to fit
         layout.addWidget(self._context_lbl)
         self._set_context_bar(None)
         return frame
+
+    def _lock_width(self) -> None:
+        """Fixed width: wide enough for the whole breadcrumb on one line and
+        for the widest row of controls. A longer breadcrumb (new scene) widens
+        it; a shorter one never narrows it, so switching tabs never moves
+        anything."""
+        if not hasattr(self, "_content"):
+            return                       # still building the UI
+        sb = self._scroll.verticalScrollBar().sizeHint().width()
+        need = max(self._context_lbl.sizeHint().width() + 24,
+                   self._content.minimumSizeHint().width() + sb + 4,
+                   460,
+                   getattr(self, "_locked_w", 0))   # grows, never shrinks: no jumps between tabs
+        if need != getattr(self, "_locked_w", 0):
+            self._locked_w = need
+            self.setFixedWidth(need)
+            self._resize_workspace_control(width=need)
+
+    def fit_initial_size(self) -> None:
+        """Open tall enough to show the whole tab (capped to the screen), so
+        the bottom is never cut off."""
+        self._lock_width()
+        chrome = self.sizeHint().height() - self._scroll.sizeHint().height()
+        want = chrome + self._content.sizeHint().height() + 4
+        screen = QApplication.desktop().availableGeometry(self) \
+            if hasattr(QApplication, "desktop") else self.screen().availableGeometry()
+        h = min(want, int(screen.height() * 0.9))
+        self.resize(self.width(), h)
+        self._resize_workspace_control(height=h)
+
+    def _resize_workspace_control(self, width: Optional[int] = None,
+                                  height: Optional[int] = None) -> None:
+        try:
+            import maya.cmds as cmds
+            ctrl = "fxBlastWorkspaceControl"
+            if not cmds.workspaceControl(ctrl, query=True, exists=True):
+                return
+            if width is not None:
+                cmds.workspaceControl(ctrl, edit=True, widthProperty="fixed",
+                                      resizeWidth=width)
+            if height is not None:
+                cmds.workspaceControl(ctrl, edit=True, resizeHeight=height)
+        except Exception:
+            pass
 
     def _set_context_bar(self, t) -> None:
         def crumb(label: str, value: str) -> str:
@@ -848,7 +900,7 @@ class PlayblastTool(*_TOOL_BASES):
         sep = f'&nbsp;&nbsp;<span style="color:{_C_CRUMB_SEP};">/</span>&nbsp;&nbsp;'
         if t is not None and t.source == "manual":
             parts = [
-                '<b style="color:#e0d090;">Out of pipeline</b>',
+                '<b style="color:#e0d090;">Off Pipe</b>',
                 crumb("Project", t.show),
                 crumb("Scene", t.asset_or_shot),
                 (f'<span style="color:{_C_CRUMB_LABEL};">Version</span> '
@@ -856,6 +908,7 @@ class PlayblastTool(*_TOOL_BASES):
             ]
             self._context_lbl.setText(
                 f'<span style="font-size:13px;">{sep.join(parts)}</span>')
+            self._lock_width()
             return
         if t is None:
             parts = [crumb(lbl, "--") for lbl in
@@ -876,6 +929,7 @@ class PlayblastTool(*_TOOL_BASES):
         parts.append(version_html)
         self._context_lbl.setText(
             f'<span style="font-size:13px;">{sep.join(parts)}</span>')
+        self._lock_width()
 
     def _build_scene_section(self) -> QWidget:
         # Show/Season/Type/Asset/Task/Scene/Version now live in the context
@@ -892,7 +946,31 @@ class PlayblastTool(*_TOOL_BASES):
         self._start_spin.valueChanged.connect(self._update_hero_sub)
         self._end_spin.valueChanged.connect(self._update_hero_sub)
         row.addWidget(self._start_spin); row.addWidget(_lbl("to"))
-        row.addWidget(self._end_spin); row.addSpacing(6); row.addWidget(fr_btn); row.addStretch()
+        row.addWidget(self._end_spin); row.addSpacing(6); row.addWidget(fr_btn)
+
+        # Anamorphic on the same line, with clear space before it
+        row.addSpacing(28)
+        self._ana_chk = _chk("Anamorphic")
+        self._ana_chk.toggled.connect(self._on_anamorphic_toggled)
+        row.addWidget(self._ana_chk)
+        row.addSpacing(10)
+        row.addWidget(_lbl("Squeeze:"))
+        self._squeeze_combo = QComboBox(); self._squeeze_combo.setMaximumWidth(78)
+        self._squeeze_combo.setStyleSheet("font-size:12px;")
+        for f in ANAMORPHIC_SQUEEZE_FACTORS:
+            self._squeeze_combo.addItem(f"{f}x", userData=f)
+        self._squeeze_combo.setCurrentIndex(ANAMORPHIC_SQUEEZE_FACTORS.index(DEFAULT_SQUEEZE_FACTOR))
+        self._squeeze_combo.currentIndexChanged.connect(self._update_output_preview)
+        row.addWidget(self._squeeze_combo)
+        row.addSpacing(6)
+        # Fixed width: the text comes and goes, the row must not move
+        self._blast_size_lbl = QLabel()
+        self._blast_size_lbl.setStyleSheet(f"font-size:11px; color:{_C_DIM};")
+        self._blast_size_lbl.setFixedWidth(
+            self._blast_size_lbl.fontMetrics().horizontalAdvance("\u2192  9999 x 9999  (2.0:1)") + 8)
+        row.addWidget(self._blast_size_lbl)
+        row.addStretch()
+        self._sync_anamorphic_controls()
         return w
 
     # ── Camera ────────────────────────────────────────────────────────────────
@@ -1011,28 +1089,6 @@ class PlayblastTool(*_TOOL_BASES):
 
     # ── Anamorphic ────────────────────────────────────────────────────────────
 
-    def _build_anamorphic_section(self) -> QWidget:
-        w      = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(5)
-        layout.addWidget(_section_header("Anamorphic"))
-        self._ana_chk = _chk("Enable")
-        self._ana_chk.toggled.connect(self._on_anamorphic_toggled)
-        layout.addWidget(self._ana_chk)
-        sq_row = QHBoxLayout(); sq_row.setSpacing(8)
-        sq_row.addWidget(_lbl("Squeeze:"))
-        self._squeeze_combo = QComboBox(); self._squeeze_combo.setMaximumWidth(78)
-        self._squeeze_combo.setStyleSheet("font-size:12px;")
-        for f in ANAMORPHIC_SQUEEZE_FACTORS:
-            self._squeeze_combo.addItem(f"{f}x", userData=f)
-        self._squeeze_combo.setCurrentIndex(ANAMORPHIC_SQUEEZE_FACTORS.index(DEFAULT_SQUEEZE_FACTOR))
-        self._squeeze_combo.currentIndexChanged.connect(self._update_output_preview)
-        self._blast_size_lbl = QLabel(); self._blast_size_lbl.setStyleSheet(f"font-size:11px; color:{_C_DIM};")
-        sq_row.addWidget(self._squeeze_combo); sq_row.addWidget(self._blast_size_lbl); sq_row.addStretch()
-        layout.addLayout(sq_row)
-        self._sync_anamorphic_controls()
-        return w
-
     # ── Format ────────────────────────────────────────────────────────────────
 
     def _build_format_section(self) -> QWidget:
@@ -1059,7 +1115,7 @@ class PlayblastTool(*_TOOL_BASES):
         for j, fmt in enumerate(MOVIE_FORMATS):
             rb = QRadioButton(MOVIE_LABELS[fmt])
             rb.setStyleSheet(f"font-size:12px; color:{_C_VALUE};")
-            rb.setToolTip("Blasts an image sequence (kept), then encodes it into the movies folder.")
+            rb.setToolTip(MOVIE_TOOLTIPS[fmt])
             self._fmt_btn_group.addButton(rb, len(IMAGE_FORMATS) + j)
             rb.toggled.connect(self._on_format_changed)
             grid.addWidget(rb, 1, j + 1)
@@ -1321,6 +1377,7 @@ class PlayblastTool(*_TOOL_BASES):
         self._output_path_lbl.setWordWrap(True)
         self._output_path_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self._output_path_lbl.setMinimumWidth(1)
+        self._output_path_lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self._output_path_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         row = QHBoxLayout(); row.setSpacing(6)
         row.addWidget(self._output_path_lbl, 1)
@@ -1450,7 +1507,7 @@ class PlayblastTool(*_TOOL_BASES):
             self._tokens = None; self._resolver = None
             msg = str(exc)
             if not manual and "No scene file is open" not in msg:
-                msg += "\n\nTo blast this scene anyway, use the Manual tab."
+                msg += "\n\nTo blast this scene anyway, use the Off Pipe tab."
             self._error_banner.setText(msg); self._error_banner.setVisible(True)
             self._set_context_bar(None)
             self._set_blast_enabled(False); self._output_path_lbl.setText("--")
@@ -1935,7 +1992,8 @@ class PlayblastTool(*_TOOL_BASES):
             sq = self._squeeze_combo.currentData()
             cam_res = self._cam_res(cams[0]["label"])
             bw, bh = calculate_anamorphic_blast_size(cam_res[0], cam_res[1], sq)
-            self._blast_size_lbl.setText(f"\u2192  blast at {bw} x {bh} px  (PAR {sq}:1)")
+            self._blast_size_lbl.setText(f"\u2192  {bw} x {bh}  ({sq}:1)")
+            self._blast_size_lbl.setToolTip(f"Blast size {bw} x {bh} px, pixel aspect {sq}:1")
         self._update_hero_sub()
 
     def _set_output_paths(self, lines: list[str]) -> None:
@@ -2525,7 +2583,6 @@ class PlayblastTool(*_TOOL_BASES):
     def _sync_anamorphic_controls(self) -> None:
         enabled = self._ana_chk.isChecked()
         self._squeeze_combo.setEnabled(enabled)
-        self._blast_size_lbl.setVisible(enabled)
         if not enabled: self._blast_size_lbl.clear()
 
     @staticmethod

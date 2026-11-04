@@ -100,8 +100,13 @@ FORMAT_EXTENSIONS = {
 MOVIE_FORMATS = ["h264", "prores"]
 
 MOVIE_LABELS = {
-    "h264":   "H.264 .mp4",
-    "prores": "ProRes .mov",
+    "h264":   ".mp4",
+    "prores": ".mov",
+}
+
+MOVIE_TOOLTIPS = {
+    "h264":   "H.264 .mp4 - blasts a JPG sequence (kept), then encodes it into the movies folder.",
+    "prores": "ProRes .mov - blasts a PNG sequence (kept), then encodes it into the movies folder.",
 }
 
 MOVIE_EXTENSIONS = {
