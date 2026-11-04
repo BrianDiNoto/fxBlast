@@ -329,11 +329,13 @@ def setup_hud(
     # Bottom sections stack upward from block 0: add bottom line first
     if section >= 5:
         lines.reverse()
-    for fid, label, value, per_frame in lines:
+    for fid, label, value, _per_frame in lines:
         command = value if callable(value) else (lambda v=value: v)
+        # Every command needs a trigger, or Maya warns and leaves the line
+        # inactive: refresh all of them each frame (cheap for fixed text).
         _add_hud(f"FXpblast_{fid}", section=section, label=label,
                  command=command if value != "" else None,
-                 attach=per_frame, align=align)
+                 attach=True, align=align)
 
     return snapshot
 
