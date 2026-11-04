@@ -50,7 +50,8 @@ def _fps_arg(fps: float) -> str:
 def ffmpeg_prefix() -> list[str]:
     """
     Command prefix that runs ffmpeg: FX_FFMPEG_PATH if set, else the rez
-    package through rez-env.
+    package through rez-env (tested at the studio: arguments, including the
+    %04d frame pattern, reach ffmpeg unchanged).
     """
     if FFMPEG_PATH:
         if not os.path.isfile(FFMPEG_PATH):
@@ -150,8 +151,12 @@ def encode(
                 raise MovieCancelled()
             time.sleep(0.05)
 
+        err.seek(0)
+        detail = err.read().decode("utf-8", "replace").strip()[-1500:]
         if proc.returncode != 0:
-            err.seek(0)
-            detail = err.read().decode("utf-8", "replace").strip()[-1500:]
             raise MovieError(
                 f"ffmpeg failed (exit code {proc.returncode}):\n\n{detail or 'no output'}")
+        # Never report a movie that isn't there
+        if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+            raise MovieError(
+                f"ffmpeg finished but wrote no movie:\n\n{out_path}\n\n{detail or 'no output'}")
