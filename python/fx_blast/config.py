@@ -133,17 +133,26 @@ FFMPEG_REZ_PACKAGE = "ffmpeg-8.0.0"
 FFMPEG_PATH        = os.environ.get("FX_FFMPEG_PATH") or ""
 
 # ── Burn-in HUD ────────────────────────────────────────────────────────────────
-# (id, label) -- every field is on by default; the artist can turn each off.
+# (id, label, on by default), in the order the lines are stacked.
 
 BURN_IN_FIELDS = [
-    ("shot",    "Show / season / shot"),
-    ("version", "Version"),
-    ("focal",  "Focal length"),
-    ("fps",    "Frame rate"),
-    ("range",  "Frame range"),
-    ("res",    "Resolution"),
-    ("camera", "Camera name"),
+    ("shot",    "Show / season / shot", True),
+    ("camera",  "Camera",               True),
+    ("focal",   "Focal length",         True),
+    ("res",     "Resolution",           True),
+    ("fps",     "FPS",                  True),
+    ("version", "Version",              False),
+    ("frame",   "Frame number",         False),
 ]
+
+# (label, Maya HUD section, alignment). Sections: 0-4 top row, 5-9 bottom row.
+BURN_IN_CORNERS = [
+    ("Top left",     0, "left"),
+    ("Top right",    4, "right"),
+    ("Bottom left",  5, "left"),
+    ("Bottom right", 9, "right"),
+]
+DEFAULT_BURN_IN_CORNER = "Top left"
 
 # ── Frame padding ───────────────────────────────────────────────────────────────
 

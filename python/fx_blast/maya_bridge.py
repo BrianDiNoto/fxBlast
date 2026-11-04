@@ -273,30 +273,27 @@ def calculate_anamorphic_blast_size(
 # ── HUD ────────────────────────────────────────────────────────────────────────
 
 def setup_hud(
+    fields:       set,
+    section:      int,
+    align:        str,
+    shot_info:    str,
     camera_name:  str,
     camera_shape: str,
     width:        int,
     height:       int,
     fps:          float,
+    version:      str,
     start_frame:  int,
     end_frame:    int,
-    fields:       set,
-    shot_info:    str = "",
-    version:      str = "",
 ) -> dict:
     """
-    Paint the burn-in HUD. Every HUD the artist has on is hidden for the
-    blast (the burn-in replaces it) and restored by teardown_hud.
+    Paint the burn-in as one stack of lines in one corner (`section`).
+    Every HUD the artist has on is hidden (the burn-in replaces it) and
+    restored by teardown_hud(snapshot).
 
-    Top-left             -- show / season / shot
-    Top-right            -- version `fields` holds the ids from config.BURN_IN_FIELDS
-    the artist left on; anything not in it is left out.
-
-    Bottom-center line 1 -- camera name   focal length
-    Bottom-center line 2 -- resolution   frame rate
-    Bottom-right         -- current frame   (frame range), refreshed per frame
-
-    Returns a snapshot of pre-existing HUD state for restoration.
+    Focal length and frame number are read on every frame, so a zoom shows.
+    Values come from Python callables: a string command would be run as
+    Python (the HUD is made from Python), and MEL there is a syntax error.
     """
     teardown_hud()
 
@@ -310,35 +307,40 @@ def setup_hud(
         except Exception:
             pass
 
-    line1, line2 = [], []
-    if "camera" in fields:
-        line1.append(camera_name)
-    if "focal" in fields:
-        fl_raw = _safe_get_attr(camera_shape, "focalLength")
-        if fl_raw:
-            line1.append(f"{int(round(fl_raw))}mm")
-    if "res" in fields:
-        line2.append(f"{width}x{height}")
-    if "fps" in fields:
-        line2.append(f"{int(fps)}fps" if fps == int(fps) else f"{fps}fps")
+    def focal() -> str:
+        value = _safe_get_attr(camera_shape, "focalLength")
+        return f"{value:.1f}mm".replace(".0mm", "mm") if value else "--"
 
-    if "shot" in fields and shot_info:
-        _add_hud("FXpblast_shot", section=0, label=shot_info)
-    if "version" in fields and version:
-        _add_hud("FXpblast_version", section=4, label=version)
-    if line1:
-        _add_hud("FXpblast_line1", section=7, label="   ".join(line1))
-    if line2:
-        _add_hud("FXpblast_line2", section=7, label="   ".join(line2))
-    if "range" in fields:
-        _add_hud("FXpblast_frame", section=9, label="",
-                 command=_frame_counter_cmd(start_frame, end_frame), attach=True)
+    def frame() -> str:
+        return f"{int(round(cmds.currentTime(query=True)))}   ({start_frame}-{end_frame})"
+
+    fps_txt = f"{int(fps)}" if fps == int(fps) else f"{fps}"
+    # (id, label, static value or callable, refresh every frame)
+    lines = [
+        ("shot",    shot_info,       "",                    False),
+        ("camera",  "Camera:",       camera_name,           False),
+        ("focal",   "Focal length:", focal,                 True),
+        ("res",     "Resolution:",   f"{width}x{height}",   False),
+        ("fps",     "FPS:",          fps_txt,               False),
+        ("version", "Version:",      version,               False),
+        ("frame",   "Frame:",        frame,                 True),
+    ]
+    lines = [ln for ln in lines if ln[0] in fields and (ln[1] or ln[2])]
+    # Bottom sections stack upward from block 0: add bottom line first
+    if section >= 5:
+        lines.reverse()
+    for fid, label, value, per_frame in lines:
+        command = value if callable(value) else (lambda v=value: v)
+        _add_hud(f"FXpblast_{fid}", section=section, label=label,
+                 command=command if value != "" else None,
+                 attach=per_frame, align=align)
 
     return snapshot
 
 
 def teardown_hud(snapshot: Optional[dict] = None) -> None:
-    """Remove all HUD elements created by this tool and restore built-in state."""
+    """Remove all HUD elements created by this tool and restore the
+    artist's own HUDs."""
     for hud_id in list(_ACTIVE_HUD_IDS):
         try:
             if cmds.headsUpDisplay(hud_id, exists=True):
@@ -359,8 +361,9 @@ def _add_hud(
     hud_id:  str,
     section: int,
     label:   str,
-    command: str  = "",
+    command=None,
     attach:  bool = False,
+    align:   str  = "left",
 ) -> None:
     """Create a single HUD element and register it for cleanup.
 
@@ -375,14 +378,15 @@ def _add_hud(
         print(f"[fxBlast] burn-in: no free HUD block in section {section}: {exc}")
         return
     kwargs = dict(
-        section       = section,
-        block         = block,
-        blockSize     = "large",
-        label         = label,
-        labelFontSize = "large",
-        dataFontSize  = "large",
+        section        = section,
+        block          = block,
+        blockSize      = "large",
+        blockAlignment = align,
+        label          = label,
+        labelFontSize  = "large",
+        dataFontSize   = "large",
     )
-    if command:
+    if command is not None:
         kwargs["command"]         = command
         kwargs["attachToRefresh"] = attach
     try:
@@ -390,12 +394,6 @@ def _add_hud(
         _ACTIVE_HUD_IDS.append(hud_id)
     except Exception as exc:
         print(f"[fxBlast] burn-in: could not add {hud_id}: {exc}")
-
-
-def _frame_counter_cmd(start_frame: int, end_frame: int) -> str:
-    """MEL expression: current frame plus the blast's frame range."""
-    return ('int $f = `currentTime -q`; '
-            f'string $s = "Frame  " + $f + "   ({start_frame}-{end_frame})"; $s')
 
 
 # ── Playblast execution ────────────────────────────────────────────────────────
@@ -584,6 +582,16 @@ def get_active_model_panel() -> Optional[str]:
         if cmds.getPanel(typeOf=p) == "modelPanel":
             return p
     return None
+
+
+def set_panel_hud(panel: str, on: bool) -> Optional[bool]:
+    """Turn a model panel's HUD display on/off; returns the previous state."""
+    try:
+        was = cmds.modelEditor(panel, query=True, hud=True)
+        cmds.modelEditor(panel, edit=True, hud=on)
+        return was
+    except Exception:
+        return None
 
 
 def get_active_viewport_camera() -> Optional[dict]:

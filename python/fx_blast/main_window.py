@@ -42,7 +42,8 @@ except ImportError:
     _TOOL_BASES = (QWidget,)
 
 from .config import (
-    ANAMORPHIC_SQUEEZE_FACTORS, BURN_IN_FIELDS, DEFAULT_FORMAT,
+    ANAMORPHIC_SQUEEZE_FACTORS, BURN_IN_CORNERS, BURN_IN_FIELDS,
+    DEFAULT_BURN_IN_CORNER, DEFAULT_FORMAT,
     DEFAULT_PRORES_PROFILE, DEFAULT_RESOLUTION, DEFAULT_SQUEEZE_FACTOR,
     FORMAT_EXTENSIONS, FORMAT_LABELS, FRAME_PADDING, IMAGE_FORMATS,
     MOVIE_FORMATS, MOVIE_LABELS, MOVIE_SEQUENCE_FORMAT, MOVIE_TOOLTIPS,
@@ -468,6 +469,7 @@ class PlayblastTool(*_TOOL_BASES):
         self._refresh_scene()
 
     def closeEvent(self, event):
+        self._end_burn_preview()
         try:
             from .maya_bridge import kill_script_jobs
             kill_script_jobs(self._rg_jobs); self._rg_jobs = []
@@ -640,10 +642,35 @@ class PlayblastTool(*_TOOL_BASES):
             self._refresh_scene()
         else:
             self._update_output_preview()
+        self._refit_height()
 
     def _on_manual_mode_changed(self, *_):
         self._apply_tab_mode()
         self._update_output_preview()
+        self._refit_height()
+
+    def _refit_height(self) -> None:
+        """Floating window: height follows the tab and the open sections, so
+        nothing is cut off (above 90% of the screen, the tab scrolls).
+        Docked, Maya owns the height."""
+        if not self.isVisible():
+            return
+        try:
+            import maya.cmds as cmds
+            if not cmds.workspaceControl("fxBlastWorkspaceControl", query=True, floating=True):
+                return
+        except Exception:
+            pass
+        QTimer.singleShot(0, self._apply_height)
+
+    def _apply_height(self) -> None:
+        self._content.adjustSize()
+        h = self.wanted_height()
+        win = self.window()
+        if win is not None and win is not self:
+            win.resize(win.width(), win.height() - self.height() + h)
+        self.resize(self.width(), h)
+        self._resize_workspace_control(height=h)
 
     def _apply_tab_mode(self) -> None:
         """Simple hides the Advanced-only sections. Both tabs share the same
@@ -790,6 +817,7 @@ class PlayblastTool(*_TOOL_BASES):
         self._on_playblast()
 
     def _begin_busy(self) -> None:
+        self._end_burn_preview()      # the blast paints its own burn-in
         self._busy, self._stop_requested = True, False
         self._hero_btn.setEnabled(True)
         self._hero_btn.setToolTip("Stops before the next camera or layer, and cancels "
@@ -1325,21 +1353,43 @@ class PlayblastTool(*_TOOL_BASES):
         grid = QGridLayout(); grid.setContentsMargins(20, 0, 0, 0)
         grid.setHorizontalSpacing(10); grid.setVerticalSpacing(4)
         self._burn_chks = {}
-        for n, (fid, label) in enumerate(BURN_IN_FIELDS):
-            cb = _chk(label, checked=True)
+        for n, (fid, label, on) in enumerate(BURN_IN_FIELDS):
+            cb = _chk(label, checked=on)
             self._burn_chks[fid] = cb
             grid.addWidget(cb, n // 3, n % 3)
         grid.setColumnStretch(3, 1)
         bl.addLayout(grid)
+
+        row = QHBoxLayout(); row.setContentsMargins(20, 2, 0, 0); row.setSpacing(8)
+        row.addWidget(_lbl("Position:"))
+        self._burn_corner = QComboBox(); self._burn_corner.setStyleSheet("font-size:12px;")
+        for label, _sec, _al in BURN_IN_CORNERS:
+            self._burn_corner.addItem(label)
+        self._burn_corner.setCurrentText(DEFAULT_BURN_IN_CORNER)
+        row.addWidget(self._burn_corner)
+        row.addSpacing(16)
+        self._burn_preview_btn = QPushButton("Preview Burn-In")
+        self._burn_preview_btn.setCheckable(True)
+        self._burn_preview_btn.setStyleSheet(_S_SMALL_BTN)
+        self._burn_preview_btn.setToolTip(
+            "Show the burn-in in the active viewport now. Click again to "
+            "remove it and bring back your own HUD.")
+        self._burn_preview_btn.toggled.connect(self._on_burn_preview)
+        row.addWidget(self._burn_preview_btn); row.addStretch()
+        bl.addLayout(row)
         layout.addWidget(self._burn_body)
 
         def on_hud(on):
-            for cb in self._burn_chks.values():
-                cb.setEnabled(on)
+            for w in list(self._burn_chks.values()) + [self._burn_corner, self._burn_preview_btn]:
+                w.setEnabled(on)
+            if not on:
+                self._burn_preview_btn.setChecked(False)
             self._update_burn_title()
         self._hud_chk.toggled.connect(on_hud)
         for cb in self._burn_chks.values():
             cb.toggled.connect(self._update_burn_title)
+            cb.toggled.connect(self._redo_burn_preview)
+        self._burn_corner.currentIndexChanged.connect(self._redo_burn_preview)
         self._burn_toggle.toggled.connect(self._on_burn_toggle)
         self._on_burn_toggle(False)
         return container
@@ -1353,12 +1403,76 @@ class PlayblastTool(*_TOOL_BASES):
     def _on_burn_toggle(self, expanded: bool) -> None:
         self._burn_body.setVisible(expanded)
         self._update_burn_title()
+        self._refit_height()
+
+    # ── Burn-in preview ───────────────────────────────────────────────────────
+    _burn_preview_state = None      # (user HUD snapshot, panel, panel HUD was on)
+
+    def _burn_hud_args(self, cam: dict, s: dict, fps: float,
+                       camera_name: Optional[str] = None) -> dict:
+        """Arguments for maya_bridge.setup_hud -- same for preview and blast."""
+        w, h = self._cam_res(cam["label"])
+        return dict(
+            fields=s["burn"], section=s["burn_section"], align=s["burn_align"],
+            shot_info=self._burn_shot_info(), camera_name=camera_name or cam["label"],
+            camera_shape=cam["shape"], width=w, height=h, fps=fps,
+            version=self._resolver.version if self._resolver else "",
+            start_frame=s["start"], end_frame=s["end"],
+        )
+
+    def _on_burn_preview(self, on: bool) -> None:
+        if not on:
+            self._end_burn_preview(); return
+        cams = self._blast_cameras()
+        if self._tokens is None or not cams:
+            self._set_status("Burn-in preview needs scene info and a camera.", error=True)
+            self._burn_preview_btn.blockSignals(True)
+            self._burn_preview_btn.setChecked(False)
+            self._burn_preview_btn.blockSignals(False)
+            return
+        try:
+            from .maya_bridge import get_active_model_panel, get_fps, set_panel_hud, setup_hud
+            if self._burn_preview_state:                # re-paint: keep the
+                snap, panel, hud_was = self._burn_preview_state  # first snapshot
+                setup_hud(**self._burn_hud_args(cams[0], self._blast_settings(), get_fps()))
+            else:
+                snap = setup_hud(**self._burn_hud_args(cams[0], self._blast_settings(), get_fps()))
+                panel = get_active_model_panel()
+                hud_was = set_panel_hud(panel, True) if panel else None
+            self._burn_preview_state = (snap, panel, hud_was)
+            self._burn_preview_btn.setText("Hide Preview")
+        except Exception as exc:
+            self._set_status(f"Burn-in preview failed: {exc}", error=True)
+
+    def _redo_burn_preview(self, *_):
+        if self._burn_preview_state:
+            self._on_burn_preview(True)
+
+    def _end_burn_preview(self) -> None:
+        """Remove the preview and give the artist their own HUD back."""
+        state, self._burn_preview_state = self._burn_preview_state, None
+        if hasattr(self, "_burn_preview_btn"):
+            self._burn_preview_btn.blockSignals(True)
+            self._burn_preview_btn.setChecked(False)
+            self._burn_preview_btn.setText("Preview Burn-In")
+            self._burn_preview_btn.blockSignals(False)
+        if not state:
+            return
+        snap, panel, hud_was = state
+        try:
+            from .maya_bridge import set_panel_hud, teardown_hud
+            teardown_hud(snap)
+            if panel and hud_was is False:
+                set_panel_hud(panel, False)
+        except Exception:
+            pass
 
     def _on_po_toggle(self, expanded: bool) -> None:
         self._po_body.setVisible(expanded)
         self._po_toggle.setText(
             ("\u25bc" if expanded else "\u25b6") + "  Playblast Options"
         )
+        self._refit_height()
         if expanded:
             self._refresh_vp2_settings()
 
@@ -1455,7 +1569,8 @@ class PlayblastTool(*_TOOL_BASES):
 
     def _make_rv_button(self, folder: str) -> QPushButton:
         """Small per-row button that plays that row's sequence in RV."""
-        btn = QPushButton("\u25b6")
+        btn = QPushButton()
+        btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         btn.setFixedSize(22, 20)
         btn.setStyleSheet(_S_RV_MINI)
         btn.setToolTip("Play in RV")
@@ -2024,6 +2139,8 @@ class PlayblastTool(*_TOOL_BASES):
             movie   = self._movie_format(),
             prores  = self._prores_profile(),
             burn    = {fid for fid, cb in self._burn_chks.items() if cb.isChecked()},
+            burn_section = BURN_IN_CORNERS[self._burn_corner.currentIndex()][1],
+            burn_align   = BURN_IN_CORNERS[self._burn_corner.currentIndex()][2],
             anam    = anam,
             squeeze = self._squeeze_combo.currentData() if anam else None,
             start   = self._start_spin.value(),
@@ -2094,15 +2211,7 @@ class PlayblastTool(*_TOOL_BASES):
             if s["anam"] and s["squeeze"] is not None:
                 anam_snap = configure_anamorphic(cam["shape"], s["squeeze"])
             if burn_in:
-                hud_snap = setup_hud(
-                    camera_name=hud_camera_name or cam["label"],
-                    camera_shape=cam["shape"],
-                    width=deliver_w, height=deliver_h, fps=fps,
-                    start_frame=s["start"], end_frame=s["end"],
-                    fields=s["burn"],
-                    shot_info=self._burn_shot_info(),
-                    version=self._resolver.version,
-                )
+                hud_snap = setup_hud(**self._burn_hud_args(cam, s, fps, hud_camera_name))
             folder = execute_playblast(
                 resolver=self._resolver, camera=cam["transform"],
                 width=cam_w, height=cam_h, image_format=s["fmt"],
