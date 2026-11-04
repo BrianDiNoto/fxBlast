@@ -117,7 +117,7 @@ def parse_scene_path(scene_path: str) -> SceneTokens:
     scene_path = os.path.normpath(scene_path)
     _validate_saved(scene_path)
 
-    fields = scene_fields()
+    fields = scene_fields(scene_path)
     if fields:
         tokens = SceneTokens(
             show          = fields["show"],

@@ -475,8 +475,9 @@ class PlayblastTool(*_TOOL_BASES):
         self._refresh_btn.setStyleSheet(_S_REFRESH)
         self._refresh_btn.setToolTip(
             "Green = refreshed from the pipeline context.\n"
-            "Yellow = refreshed, but falling back to the scene path (pipeline "
-            "context not available).\nRed = could not read this scene.")
+            "Yellow = refreshed from the scene path (pipeline context not "
+            "available, or the scene is outside the task Maya was launched in)."
+            "\nRed = could not read this scene.")
         self._refresh_btn.clicked.connect(self._refresh_scene)
         root.addWidget(self._refresh_btn)
 
@@ -1054,7 +1055,7 @@ class PlayblastTool(*_TOOL_BASES):
             _S_REFRESH_OK if self._tokens.source == "pipeline" else _S_REFRESH_WARN)
         self._set_status(
             "Scene info from the pipeline context" if self._tokens.source == "pipeline"
-            else "Scene info from the scene path (pipeline context not available)",
+            else "Scene info from the scene path (no pipeline context for this scene)",
             error=self._tokens.source != "pipeline")
         self._cam_resolution_overrides.clear()
         self._cam_res_custom.clear()

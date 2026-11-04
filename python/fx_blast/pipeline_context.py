@@ -25,15 +25,39 @@ _ENTITIES = {
 }
 
 
-def scene_fields() -> Optional[dict]:
+def _norm(path: str) -> str:
+    # Windows paths: separator- and case-insensitive compare
+    return path.replace("\\", "/").rstrip("/").lower()
+
+
+def _scene_in_task(scene_path: str) -> bool:
+    """
+    True when the open scene sits inside the launch context's task folder.
+
+    The FX_* variables are set once, when the launcher starts Maya. They do
+    not follow the artist when a scene from another task is opened, so the
+    context only describes the open scene if the scene is under FX_TASK_DIR.
+    Without FX_TASK_DIR there is nothing to check against: trust the context.
+    """
+    task_dir = os.environ.get("FX_TASK_DIR")
+    if not task_dir or not scene_path:
+        return True
+    return _norm(scene_path).startswith(_norm(task_dir) + "/")
+
+
+def scene_fields(scene_path: str = "") -> Optional[dict]:
     """
     Scene tokens from the pipeline context, or None if the context library
-    isn't importable or the launcher variables are incomplete (callers then
-    fall back to reading the scene path).
+    isn't importable, the launcher variables are incomplete, or the open
+    scene is outside the launch task (callers then fall back to reading the
+    scene path).
 
     Returns keys: show, season, context_type, type_or_seq, asset_or_shot,
     task, dcc.
     """
+    if not _scene_in_task(scene_path):
+        return None
+
     try:
         from fx_context_utils.shot_structure import shot_structure_from_environment
         structure = shot_structure_from_environment()
