@@ -136,6 +136,8 @@ FFMPEG_PATH        = os.environ.get("FX_FFMPEG_PATH") or ""
 # (id, label) -- every field is on by default; the artist can turn each off.
 
 BURN_IN_FIELDS = [
+    ("shot",    "Show / season / shot"),
+    ("version", "Version"),
     ("focal",  "Focal length"),
     ("fps",    "Frame rate"),
     ("range",  "Frame range"),

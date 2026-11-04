@@ -19,7 +19,7 @@ try:
         QGroupBox, QHBoxLayout, QHeaderView, QLabel,
         QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
         QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStyle,
-        QStyledItemDelegate, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+        QStyle, QStyledItemDelegate, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     )
     from PySide2.QtCore import QPoint, Qt, QTimer
     from PySide2.QtGui import QColor, QFont, QFontMetrics, QIcon
@@ -30,7 +30,7 @@ except ImportError:
         QGroupBox, QHBoxLayout, QHeaderView, QLabel,
         QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
         QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStyle,
-        QStyledItemDelegate, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+        QStyle, QStyledItemDelegate, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     )
     from PySide6.QtCore import QPoint, Qt, QTimer
     from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon
@@ -137,34 +137,6 @@ _S_ERROR = """
         padding: 6px 10px; font-size: 12px;
     }
 """
-_S_BLAST = """
-    QPushButton {
-        background: #454545; color: #b8b8b8; border: 1px solid #606060;
-        border-radius: 4px; padding: 3px 0; font-size: 12px;
-        font-weight: normal; min-height: 22px;
-    }
-    QPushButton:hover   { background: #525252; }
-    QPushButton:pressed { background: #383838; }
-    QPushButton:disabled{ background: #282828; color: #484848; border-color: #383838; }
-"""
-_S_BLAST_DONE = """
-    QPushButton {
-        background: #334d33; color: #c8e0c8; border: 1px solid #3e5e3e;
-        border-radius: 4px; padding: 3px 0; font-size: 12px;
-        font-weight: normal; min-height: 22px;
-    }
-    QPushButton:hover   { background: #3d5e3d; }
-    QPushButton:pressed { background: #28402a; }
-    QPushButton:disabled{ background: #222e22; color: #445044; border-color: #2e3e2e; }
-"""
-# Blast buttons while a blast runs: they turn into Stop
-_S_STOP = """
-    QPushButton {
-        background: #6a2e2e; color: #ffd0d0; border: 1px solid #a04848;
-        border-radius: 4px; padding: 3px 0; font-size: 12px; min-height: 22px;
-    }
-    QPushButton:hover { background: #7a3636; }
-"""
 _S_HERO_STOP = """
     QPushButton#fxBlastHero {
         background: #6a2e2e; border: 1px solid #a04848; border-radius: 5px; min-height: 52px;
@@ -241,13 +213,6 @@ _S_CAM_LIST = f"""
 """
 _C_CAM_CHECKED   = "#7ab87a"   # green text for checked cameras
 _C_CAM_UNCHECKED = _C_VALUE    # normal text for unchecked
-_S_PATH = """
-    QLabel {
-        background: rgba(0,0,0,0.2); color: #90c890;
-        border: 1px solid rgba(255,255,255,0.07); border-radius: 3px;
-        padding: 5px 8px; font-family: monospace; font-size: 11px;
-    }
-"""
 _S_TWIRL = """
     QPushButton {
         text-align: left; padding: 3px 8px;
@@ -605,19 +570,6 @@ class PlayblastTool(*_TOOL_BASES):
         root.addWidget(self._simple_cam_lbl)
         root.addWidget(self._build_hero_button())
 
-        self._blast_row = QWidget()
-        btn_row = QHBoxLayout(self._blast_row); btn_row.setSpacing(8)
-        btn_row.setContentsMargins(0, 0, 0, 0)
-        self._blast_btn = QPushButton("Playblast")
-        self._blast_btn.setStyleSheet(_S_BLAST)
-        self._blast_btn.setFixedWidth(140)
-        self._blast_btn.clicked.connect(self._on_blast_clicked)
-        btn_row.addStretch()
-        btn_row.addWidget(self._blast_btn)
-        btn_row.addStretch()
-        root.addWidget(self._blast_row)
-
-        root.addWidget(self._build_output_section())
         self._versions_section = self._build_versions_section()
         root.addWidget(self._versions_section)
         root.addStretch()
@@ -698,10 +650,9 @@ class PlayblastTool(*_TOOL_BASES):
         widgets, so frame range, format, note etc. never go out of sync."""
         simple = self._is_simple()
         for w in (self._cam_hline, self._cam_section, self._layers_section,
-                  self._po_section, self._blast_row):
+                  self._po_section):
             w.setVisible(not simple)
-        for w in (self._simple_cam_lbl, self._hero_btn):
-            w.setVisible(simple)
+        self._simple_cam_lbl.setVisible(simple)
         self._manual_box.setVisible(self._is_manual())
 
     def _build_manual_box(self) -> QWidget:
@@ -742,7 +693,6 @@ class PlayblastTool(*_TOOL_BASES):
         hint.setStyleSheet(f"font-size:11px; color:{_C_DIM};")
         row.addWidget(hint); row.addStretch()
         lay.addLayout(row)
-        lay.addWidget(_hline())
         return self._manual_box
 
     def _update_project_box(self) -> None:
@@ -779,6 +729,7 @@ class PlayblastTool(*_TOOL_BASES):
         lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(1)
         self._hero_title = QLabel("Playblast"); self._hero_title.setObjectName("fxBlastHeroTitle")
         self._hero_sub   = QLabel("");          self._hero_sub.setObjectName("fxBlastHeroSub")
+        self._hero_sub.setWordWrap(True)
         for lbl in (self._hero_title, self._hero_sub):
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -786,17 +737,40 @@ class PlayblastTool(*_TOOL_BASES):
         self._hero_btn.clicked.connect(self._on_blast_clicked)
         return self._hero_btn
 
+    _hero_tip = ""
+    _out_lines: list = []
+
     def _update_hero_sub(self) -> None:
+        """Readout under "Playblast": camera(s), frame range, output path(s)."""
         if not hasattr(self, "_hero_sub") or self._busy:
             return
-        cams = self._blast_cameras() if self._tokens else []
-        if self._tokens is None or not cams:
-            self._hero_sub.setText("")
+        if self._tokens is None or self._resolver is None:
+            self._hero_sub.setText(self._out_lines[0] if self._out_lines else "")
+            self._fit_hero()
             return
-        version = self._resolver.version if self._resolver else self._tokens.version
-        self._hero_sub.setText(
-            f"{version}   \u2022   {cams[0]['label']}   \u2022   "
-            f"{self._start_spin.value()}-{self._end_spin.value()}")
+        if self._layers_mode():
+            names = [layer for layer, _ in self._layer_jobs()]
+            who = "Layers: " + (", ".join(names) if names else "none checked")
+        else:
+            cams = self._blast_cameras()
+            who = ", ".join(c["label"] for c in cams) if cams else "no camera"
+        head = f"{who}   \u2022   {self._start_spin.value()}-{self._end_spin.value()}"
+        zw = "\u200b"      # lets long paths wrap at separators
+        paths = [re.sub(r"([\\/_])", r"\1" + zw, ln) for ln in self._out_lines]
+        self._hero_sub.setText("\n".join([head] + paths))
+        self._hero_tip = "\n".join(self._out_lines)
+        self._hero_btn.setToolTip(self._hero_tip)
+        self._fit_hero()
+
+    def _fit_hero(self) -> None:
+        """A push button doesn't grow for the labels inside it: size it to
+        the wrapped readout, so the paths are never cut off."""
+        lay = self._hero_btn.layout()
+        width = self._hero_btn.width() if self._hero_btn.isVisible() else \
+            getattr(self, "_locked_w", 460) - 40
+        h = lay.totalHeightForWidth(width) if lay.hasHeightForWidth() else \
+            lay.totalSizeHint().height()
+        self._hero_btn.setFixedHeight(max(52, h))
 
     # Both Playblast buttons (Advanced + Simple hero) change together.
     # While a blast runs they become Stop buttons.
@@ -806,7 +780,6 @@ class PlayblastTool(*_TOOL_BASES):
     def _set_blast_enabled(self, enabled: bool) -> None:
         if self._busy:
             return                      # the Stop button stays clickable
-        self._blast_btn.setEnabled(enabled)
         self._hero_btn.setEnabled(enabled)
 
     def _on_blast_clicked(self) -> None:
@@ -818,18 +791,16 @@ class PlayblastTool(*_TOOL_BASES):
 
     def _begin_busy(self) -> None:
         self._busy, self._stop_requested = True, False
-        self._blast_btn.setEnabled(True); self._hero_btn.setEnabled(True)
-        self._blast_btn.setText("\u25a0  Stop"); self._blast_btn.setStyleSheet(_S_STOP)
-        self._blast_btn.setToolTip("Stops before the next camera or layer, and cancels "
-                                   "a movie encode. Press Esc in Maya to stop the "
-                                   "camera being blasted now.")
+        self._hero_btn.setEnabled(True)
+        self._hero_btn.setToolTip("Stops before the next camera or layer, and cancels "
+                                  "a movie encode. Press Esc in Maya to stop the "
+                                  "camera being blasted now.")
         self._hero_title.setText("\u25a0  Stop"); self._hero_btn.setStyleSheet(_S_HERO_STOP)
         self._hero_sub.setVisible(True)
 
     def _end_busy(self) -> None:
         self._busy = False
-        self._blast_btn.setText("Playblast"); self._blast_btn.setStyleSheet(_S_BLAST)
-        self._blast_btn.setToolTip("")
+        self._hero_btn.setToolTip(self._hero_tip)
         self._hero_title.setText("Playblast"); self._hero_btn.setStyleSheet(_S_HERO)
         self._update_output_preview()
 
@@ -1432,41 +1403,6 @@ class PlayblastTool(*_TOOL_BASES):
         except Exception:
             self._dof_detail_lbl.setText("")
 
-    # ── Output path ───────────────────────────────────────────────────────────
-
-    def _build_output_section(self) -> QWidget:
-        w      = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(3)
-        self._output_path_lbl = QLabel("--")
-        self._output_path_lbl.setStyleSheet(_S_PATH)
-        self._output_path_lbl.setWordWrap(True)
-        self._output_path_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self._output_path_lbl.setMinimumWidth(1)
-        self._output_path_lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self._output_path_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        row = QHBoxLayout(); row.setSpacing(6)
-        row.addWidget(self._output_path_lbl, 1)
-        open_btn = QPushButton("Open folder")
-        open_btn.setStyleSheet(_S_REFRESH)
-        open_btn.setToolTip("Open this scene's output folder in Explorer")
-        open_btn.clicked.connect(self._on_open_folder)
-        row.addWidget(open_btn, 0, Qt.AlignTop)
-        layout.addLayout(row)
-        return w
-
-    def _on_open_folder(self) -> None:
-        """Open the current version folder, or the images folder above it
-        when this version has not been blasted yet."""
-        if self._tokens is None:
-            self._set_status("No scene info - nothing to open.", error=True); return
-        candidates = [self._resolver.output_folder] if self._resolver else []
-        candidates.append(self._tokens.images_root)
-        for folder in candidates:
-            if folder and os.path.isdir(folder):
-                self._open_file_location(folder); return
-        self._set_status("Output folder does not exist yet - blast first.", error=True)
-
     # ── Version list ──────────────────────────────────────────────────────────
 
     def _build_versions_section(self) -> QWidget:
@@ -1486,7 +1422,7 @@ class PlayblastTool(*_TOOL_BASES):
         self._ver_tree.setSelectionMode(QTreeWidget.SingleSelection)
 
         hdr = self._ver_tree.header()
-        hdr.resizeSection(_COL_PLAY, 40); hdr.resizeSection(_COL_VERSION, 62)
+        hdr.resizeSection(_COL_PLAY, 66); hdr.resizeSection(_COL_VERSION, 62)
         hdr.resizeSection(_COL_FRAMERANGE, 72); hdr.resizeSection(_COL_FRAMES, 52)
         hdr.resizeSection(_COL_FPS, 52); hdr.resizeSection(_COL_RESOLUTION, 90)
         hdr.setSectionResizeMode(_COL_PLAY, QHeaderView.Fixed)
@@ -1496,6 +1432,25 @@ class PlayblastTool(*_TOOL_BASES):
         self._ver_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._ver_tree.customContextMenuRequested.connect(self._on_version_context_menu)
         layout.addWidget(self._ver_tree)
+        return w
+
+    def _make_row_buttons(self, folder: str, play: bool) -> QWidget:
+        """Per-row buttons: Play in RV (sequence rows only) and Open file
+        location (every row), the folder button next to the Version column."""
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(0, 0, 2, 0); lay.setSpacing(2)
+        lay.addStretch()
+        if play:
+            lay.addWidget(self._make_rv_button(folder))
+        btn = QPushButton()
+        btn.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
+        btn.setFixedSize(22, 20)
+        btn.setStyleSheet(_S_RV_MINI)
+        btn.setToolTip("Open file location")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(lambda checked=False, f=folder: self._open_file_location(f))
+        lay.addWidget(btn)
         return w
 
     def _make_rv_button(self, folder: str) -> QPushButton:
@@ -1576,7 +1531,7 @@ class PlayblastTool(*_TOOL_BASES):
                 msg += "\n\nTo blast this scene anyway, use the Off Pipe tab."
             self._error_banner.setText(msg); self._error_banner.setVisible(True)
             self._set_context_bar(None)
-            self._set_blast_enabled(False); self._output_path_lbl.setText("--")
+            self._set_blast_enabled(False); self._out_lines = []
             self._refresh_btn.setStyleSheet(_S_REFRESH_ERROR)
             self._ver_tree.clear(); self._update_hero_sub()
             self._set_status("Could not read this scene - see the message above", error=True)
@@ -1748,10 +1703,11 @@ class PlayblastTool(*_TOOL_BASES):
             # the play button belongs on them, not on that parent row. A
             # single-camera version row IS the sequence, so it gets the button.
             self._ver_tree.addTopLevelItem(ver_item)
-            if not is_multi:
-                self._ver_tree.setItemWidget(ver_item, _COL_PLAY, self._make_rv_button(folder))
+            self._ver_tree.setItemWidget(ver_item, _COL_PLAY,
+                                         self._make_row_buttons(folder, play=not is_multi))
             for child, sf_folder in child_folders:
-                self._ver_tree.setItemWidget(child, _COL_PLAY, self._make_rv_button(sf_folder))
+                self._ver_tree.setItemWidget(child, _COL_PLAY,
+                                             self._make_row_buttons(sf_folder, play=True))
         self._ver_tree.blockSignals(False)
 
     def _fps_str(self, m: dict) -> str:
@@ -2007,7 +1963,7 @@ class PlayblastTool(*_TOOL_BASES):
 
     def _update_output_preview(self) -> None:
         if self._tokens is None:
-            self._output_path_lbl.setText("--"); return
+            self._set_output_paths([]); return
         fmt = self._sequence_format()
         try:
             self._resolver = build_resolver(
@@ -2015,18 +1971,13 @@ class PlayblastTool(*_TOOL_BASES):
                 image_format=fmt, frame_padding=FRAME_PADDING,
             )
         except (ResolveError, ValueError) as exc:
-            self._output_path_lbl.setText(f"  {exc}"); self._set_blast_enabled(False); return
+            self._set_output_paths([str(exc)]); self._set_blast_enabled(False); return
 
         if self._layers_mode():
             jobs  = self._layer_jobs()
             lines = []
-            for layer, cam in jobs[:4]:
-                folder = os.path.join(self._resolver.output_folder, _cam_slug(layer))
-                res = self._cam_res(cam["label"])
-                lines.append(f"{folder}  [{res[0]}x{res[1]}]")
-            if len(jobs) > 4:
-                lines.append(f"... and {len(jobs) - 4} more layers")
-            self._set_output_paths(lines or [self._resolver.output_folder])
+            lines = [self._resolver.output_folder]   # one subfolder per layer inside
+            self._set_output_paths(lines)
             self._set_blast_enabled(bool(jobs))
             return
 
@@ -2035,21 +1986,16 @@ class PlayblastTool(*_TOOL_BASES):
             self._simple_cam_lbl.setText(
                 f"Camera:  {cams[0]['label']}  (active viewport)" if cams else
                 "No camera in the active viewport - click in a viewport, then Refresh scene.")
-        lines = []
-        for cam in cams:
-            slug = _cam_slug(cam["label"])
-            folder = os.path.join(self._resolver.output_folder, slug)
-            res = self._cam_res(cam["label"])
-            tag = f"  [{res[0]}x{res[1]}]"
-            lines.append(f"{folder}{tag}")
+        # One camera: its own folder. Several: the version folder holds them.
+        lines = [os.path.join(self._resolver.output_folder, _cam_slug(cams[0]["label"]))
+                 if len(cams) == 1 else self._resolver.output_folder]
         movie_fmt = self._movie_format()
         if movie_fmt and cams:
             from .movie import movie_path
-            for cam in cams:
-                lines.append("Movie: " + movie_path(
-                    self._tokens.movies_root, self._resolver.output_basename,
-                    _cam_slug(cam["label"]), movie_fmt))
-        self._set_output_paths(lines or [self._resolver.output_folder])
+            lines.append(movie_path(self._tokens.movies_root, self._resolver.output_basename,
+                                    _cam_slug(cams[0]["label"]), movie_fmt)
+                         if len(cams) == 1 else self._tokens.movies_root)
+        self._set_output_paths(lines)
 
         self._set_blast_enabled(bool(cams))
 
@@ -2063,12 +2009,9 @@ class PlayblastTool(*_TOOL_BASES):
         self._update_hero_sub()
 
     def _set_output_paths(self, lines: list[str]) -> None:
-        """Show output paths so they wrap at folder separators (they have no
-        spaces) and never force the window wider. Clean paths in tooltip."""
-        zw = "\u200b"
-        shown = [re.sub(r"([\\/_])", r"\1" + zw, ln) for ln in lines]
-        self._output_path_lbl.setText("\n".join(shown))
-        self._output_path_lbl.setToolTip("\n".join(lines))
+        """Output path(s) for the readout in the Playblast button."""
+        self._out_lines = list(lines)
+        self._update_hero_sub()
 
     # ══════════════════════════════════════════════════════════════════════════
     # Playblast
@@ -2157,6 +2100,8 @@ class PlayblastTool(*_TOOL_BASES):
                     width=deliver_w, height=deliver_h, fps=fps,
                     start_frame=s["start"], end_frame=s["end"],
                     fields=s["burn"],
+                    shot_info=self._burn_shot_info(),
+                    version=self._resolver.version,
                 )
             folder = execute_playblast(
                 resolver=self._resolver, camera=cam["transform"],
@@ -2191,6 +2136,13 @@ class PlayblastTool(*_TOOL_BASES):
             self._encode_movie(frames_stem, slug, s, fps)
         return folder
 
+    def _burn_shot_info(self) -> str:
+        t = self._tokens
+        if t.source == "manual":
+            return f"{t.show}   {t.asset_or_shot}"
+        return "   ".join(p for p in (t.show, t.season,
+                                       f"{t.type_or_seq}/{t.asset_or_shot}") if p)
+
     def _encode_movie(self, frames_stem: str, slug: str, s: dict, fps: float) -> None:
         from .movie import MovieCancelled, MovieError, build_args, encode, movie_path
         out = movie_path(self._tokens.movies_root, self._resolver.output_basename,
@@ -2216,7 +2168,6 @@ class PlayblastTool(*_TOOL_BASES):
                      stopped: bool = False) -> None:
         # Frames live in the camera/layer subfolder, not the version folder
         blast_folder = last_folder or self._resolver.output_folder
-        self._blast_btn.setStyleSheet(_S_BLAST_DONE)
 
         key = self._ver_key(self._resolver.version)
         if s["note"]:

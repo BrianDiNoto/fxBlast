@@ -281,9 +281,15 @@ def setup_hud(
     start_frame:  int,
     end_frame:    int,
     fields:       set,
+    shot_info:    str = "",
+    version:      str = "",
 ) -> dict:
     """
-    Paint the burn-in HUD. `fields` holds the ids from config.BURN_IN_FIELDS
+    Paint the burn-in HUD. Every HUD the artist has on is hidden for the
+    blast (the burn-in replaces it) and restored by teardown_hud.
+
+    Top-left             -- show / season / shot
+    Top-right            -- version `fields` holds the ids from config.BURN_IN_FIELDS
     the artist left on; anything not in it is left out.
 
     Bottom-center line 1 -- camera name   focal length
@@ -294,15 +300,15 @@ def setup_hud(
     """
     teardown_hud()
 
-    # Snapshot and hide existing built-in HUDs to avoid clutter
+    # Hide every HUD the artist has on -- built-in or from other tools
     snapshot: dict = {}
-    for hud_id in ("HUDCurrentFrame", "HUDFocalLength", "HUDCameraNames",
-                   "HUDPolyCount", "HUDSubdDetails", "HUDNClothStatus"):
+    for hud_id in cmds.headsUpDisplay(listHeadsUpDisplays=True) or []:
         try:
-            snapshot[hud_id] = cmds.headsUpDisplay(hud_id, query=True, visible=True)
-            cmds.headsUpDisplay(hud_id, edit=True, visible=False)
+            if cmds.headsUpDisplay(hud_id, query=True, visible=True):
+                snapshot[hud_id] = True
+                cmds.headsUpDisplay(hud_id, edit=True, visible=False)
         except Exception:
-            snapshot[hud_id] = False
+            pass
 
     line1, line2 = [], []
     if "camera" in fields:
@@ -316,6 +322,10 @@ def setup_hud(
     if "fps" in fields:
         line2.append(f"{int(fps)}fps" if fps == int(fps) else f"{fps}fps")
 
+    if "shot" in fields and shot_info:
+        _add_hud("FXpblast_shot", section=0, label=shot_info)
+    if "version" in fields and version:
+        _add_hud("FXpblast_version", section=4, label=version)
     if line1:
         _add_hud("FXpblast_line1", section=7, label="   ".join(line1))
     if line2:
