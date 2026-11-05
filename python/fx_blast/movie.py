@@ -14,10 +14,7 @@ import tempfile
 import time
 from typing import Callable, Optional
 
-from .config import (
-    FFMPEG_PATH, FFMPEG_REZ_PACKAGE, FRAME_PADDING, MOVIE_EXTENSIONS,
-    PRORES_PROFILES,
-)
+from .config import FFMPEG_PATH, FFMPEG_REZ_PACKAGE, PRORES_PROFILES
 
 
 class MovieError(Exception):
@@ -66,11 +63,6 @@ def ffmpeg_prefix() -> list[str]:
     return [rez_env, FFMPEG_REZ_PACKAGE, "--", "ffmpeg"]
 
 
-def movie_path(movies_root: str, basename: str, slug: str, movie_fmt: str) -> str:
-    """e.g. .../movies/ALI2_dev_bri100_anim_Layout_v004_shotCam.mp4"""
-    return os.path.join(movies_root, f"{basename}_{slug}.{MOVIE_EXTENSIONS[movie_fmt]}")
-
-
 def build_args(
     frames_stem:    str,
     ext:            str,
@@ -78,11 +70,12 @@ def build_args(
     fps:            float,
     out_path:       str,
     movie_fmt:      str,
-    prores_profile: str = "422hq",
+    prores_profile: str = "apr",
     squeeze:        Optional[float] = None,
+    padding:        int = 4,
 ) -> list[str]:
     """ffmpeg arguments (without the ffmpeg prefix)."""
-    pattern = f"{frames_stem}.%0{FRAME_PADDING}d.{ext}"
+    pattern = f"{frames_stem}.%0{padding}d.{ext}"
     args = ["-y", "-hide_banner", "-loglevel", "error",
             "-framerate", _fps_arg(fps), "-start_number", str(start_frame),
             "-i", pattern]
@@ -103,7 +96,7 @@ def build_args(
         if prores_profile not in profiles:
             raise MovieError(f'Unknown ProRes profile "{prores_profile}".')
         num = profiles[prores_profile]
-        pix = "yuv444p10le" if prores_profile == "4444" else "yuv422p10le"
+        pix = "yuv444p10le" if num >= 4 else "yuv422p10le"
         args += ["-c:v", "prores_ks", "-profile:v", str(num),
                  "-vendor", "apl0", "-pix_fmt", pix]
     else:

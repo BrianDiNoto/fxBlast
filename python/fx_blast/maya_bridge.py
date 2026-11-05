@@ -14,7 +14,6 @@ import maya.cmds as cmds
 
 from .config import DEFAULT_FORMAT, DEFAULT_SQUEEZE_FACTOR, FORMAT_EXTENSIONS, FRAME_PADDING
 from .scene_parser import ParseError, manual_tokens, parse_scene_path, SceneTokens
-from .resolver import OutputResolver
 
 _DEFAULT_CAMERAS = {"persp", "top", "front", "side", "perspShape",
                     "topShape", "frontShape", "sideShape",
@@ -82,12 +81,37 @@ def get_manual_tokens() -> SceneTokens:
             "the project's images/ and movies/ folders.")
     tokens = manual_tokens(scene, os.path.basename(root),
                            _project_folder("images", "images"),
-                           _project_folder("movie", "movies"))
+                           _project_folder("movie", "movies"),
+                           renders_root=os.path.join(root, "renders"))
     if not tokens.version:
-        existing = OutputResolver(tokens).existing_versions()
+        existing = get_layout(tokens)[0].existing_versions()
         top = max((int(v[1:]) for v in existing), default=0)
         tokens.version = f"v{top + 1:03d}"
     return tokens
+
+
+def get_layout(tokens: SceneTokens):
+    """(OutputLayout, warning or None) for the open scene.
+
+    Pipeline templates when the launch context describes this scene (it is
+    inside FX_TASK_DIR); otherwise the same structure built locally. Off
+    Pipe mirrors it under <project>/renders, named from the workfile."""
+    from .layout import LayoutError, mirror_layout, pipeline_layout
+    from .pipeline_context import _scene_in_task
+    key = tokens.output_stem
+    if tokens.source == "manual":
+        return mirror_layout(tokens.renders_root, "", key, tokens.asset_or_shot), None
+    prefix = "_".join(p for p in (tokens.season, tokens.type_or_seq,
+                                  tokens.asset_or_shot, tokens.task) if p)
+    desc = tokens.descriptor or ""
+    warning = None
+    if os.environ.get("FX_TASK_DIR") and _scene_in_task(get_scene_path()):
+        try:
+            return pipeline_layout(key, desc), None
+        except LayoutError as exc:
+            warning = str(exc)
+            print("[fxBlast] pipeline paths unavailable, using the local layout: " + warning)
+    return mirror_layout(tokens.renders_root, prefix, key, desc), warning
 
 
 # ── Cameras ────────────────────────────────────────────────────────────────────
@@ -401,7 +425,6 @@ def _add_hud(
 # ── Playblast execution ────────────────────────────────────────────────────────
 
 def execute_playblast(
-    resolver:              OutputResolver,
     camera:                str,
     width:                 int,
     height:                int,
@@ -420,9 +443,8 @@ def execute_playblast(
     Parameters
     ----------
     output_path_override : str, optional
-        Full stem path (no frame number, no extension) for the output frames.
-        Used for multi-camera blasts where each camera writes to its own subfolder.
-        When None the resolver's frame_pattern is used (single-camera default).
+        Full stem path (no frame number, no extension) for the output frames,
+        from the output layout. Required.
     panel : str, optional
         Model panel to blast through. When None, the focused panel (or the
         first model panel) is used, as before.
@@ -435,8 +457,6 @@ def execute_playblast(
     str
         The folder that received the frames.
     """
-    resolver.prepare_output_folder()
-
     if start_frame is None or end_frame is None:
         start_frame, end_frame = get_frame_range()
 
@@ -445,8 +465,7 @@ def execute_playblast(
         blast_path    = output_path_override
         result_folder = os.path.dirname(output_path_override)
     else:
-        blast_path    = resolver.frame_pattern
-        result_folder = resolver.output_folder
+        raise ValueError("execute_playblast needs output_path_override")
 
     ext         = FORMAT_EXTENSIONS.get(image_format, "jpg")
     compression = ext

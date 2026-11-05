@@ -50,7 +50,7 @@ from .config import (
     PRORES_PROFILES, RV_PATH,
 )
 from .scene_parser import ParseError, SceneTokens
-from .resolver import OutputResolver, ResolveError, build_resolver
+from .layout import OutputLayout, load_meta, save_meta
 
 # Radio-button ids in the Format section: sequences first, then movies
 _ALL_FORMATS = IMAGE_FORMATS + MOVIE_FORMATS
@@ -59,6 +59,11 @@ _FRAME_EXTS  = (".jpg", ".png")
 
 class _Stopped(Exception):
     """The artist stopped the blast (Stop button or Esc in Maya)."""
+
+
+def _tool_version() -> str:
+    from . import __version__
+    return __version__
 
 
 def _frames_in(folder: str) -> list[str]:
@@ -70,8 +75,11 @@ def _frames_in(folder: str) -> list[str]:
         return []
 
 
-_NOTES_FILENAME = "_pb_notes.json"
-_META_FILENAME  = "_pb_meta.json"
+# Version-list item data
+_ROLE_PLAY  = Qt.UserRole + 10     # folder with the frames (Play in RV)
+_ROLE_OPEN  = Qt.UserRole + 11     # folder for Open file location
+_ROLE_DIRS  = Qt.UserRole + 12     # blast folders a row covers (Delete)
+_ROLE_METAS = Qt.UserRole + 13     # fxblast.json paths a row covers (notes)
 
 _COL_PLAY       = 0
 _COL_VERSION    = 1
@@ -455,7 +463,8 @@ class PlayblastTool(*_TOOL_BASES):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._tokens:                   Optional[SceneTokens]   = None
-        self._resolver:                 Optional[OutputResolver] = None
+        self._layout:                   Optional[OutputLayout]   = None
+        self._version:                  str                      = ""
         self._cameras:                  list[dict]               = []
         self._cam_resolution_overrides: dict[str, tuple[int, int]] = {}
         self._cam_res_custom:           set[str]                 = set()
@@ -771,7 +780,7 @@ class PlayblastTool(*_TOOL_BASES):
         """Readout under "Playblast": camera(s), frame range, output path(s)."""
         if not hasattr(self, "_hero_sub") or self._busy:
             return
-        if self._tokens is None or self._resolver is None:
+        if self._tokens is None or self._layout is None:
             self._hero_sub.setText(self._out_lines[0] if self._out_lines else "")
             self._fit_hero()
             return
@@ -1416,7 +1425,7 @@ class PlayblastTool(*_TOOL_BASES):
             fields=s["burn"], section=s["burn_section"], align=s["burn_align"],
             shot_info=self._burn_shot_info(), camera_name=camera_name or cam["label"],
             camera_shape=cam["shape"], width=w, height=h, fps=fps,
-            version=self._resolver.version if self._resolver else "",
+            version=self._version,
             start_frame=s["start"], end_frame=s["end"],
         )
 
@@ -1548,15 +1557,15 @@ class PlayblastTool(*_TOOL_BASES):
         layout.addWidget(self._ver_tree)
         return w
 
-    def _make_row_buttons(self, folder: str, play: bool) -> QWidget:
+    def _make_row_buttons(self, folder: str, play_folder: Optional[str]) -> QWidget:
         """Per-row buttons: Play in RV (sequence rows only) and Open file
         location (every row), the folder button next to the Version column."""
         w = QWidget()
         lay = QHBoxLayout(w)
         lay.setContentsMargins(0, 0, 2, 0); lay.setSpacing(2)
         lay.addStretch()
-        if play:
-            lay.addWidget(self._make_rv_button(folder))
+        if play_folder:
+            lay.addWidget(self._make_rv_button(play_folder))
         btn = QPushButton()
         btn.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         btn.setFixedSize(22, 20)
@@ -1582,46 +1591,21 @@ class PlayblastTool(*_TOOL_BASES):
     # Persistence
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _notes_path(self) -> Optional[str]:
-        return os.path.join(self._tokens.images_root, _NOTES_FILENAME) if self._tokens else None
-
-    def _meta_path(self) -> Optional[str]:
-        return os.path.join(self._tokens.images_root, _META_FILENAME) if self._tokens else None
-
-    def _load_json(self, path: Optional[str]) -> dict:
-        if not path or not os.path.isfile(path): return {}
-        try:
-            with open(path, encoding="utf-8") as f: return json.load(f)
-        except Exception: return {}
-
-    def _save_json(self, path: Optional[str], data: dict) -> None:
-        if not path: return
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f: json.dump(data, f, indent=2)
-        except Exception as exc:
-            self._set_status(f"Could not save: {exc}", error=True)
-
-    def _ver_key(self, version: str) -> str:
-        """Notes/meta key: the full version folder name, so scenes sharing a
-        task never overwrite each other's entries."""
-        return self._tokens.output_basename(version) if self._tokens else version
-
-    def _load_notes(self) -> dict: return self._load_json(self._notes_path())
-    def _save_notes(self, d): self._save_json(self._notes_path(), d)
-    def _load_meta(self)  -> dict: return self._load_json(self._meta_path())
-    def _save_meta(self,  d): self._save_json(self._meta_path(), d)
-
     def _on_notes_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        """A version's note is kept in every blast (camera/layer) of it."""
         if column != _COL_NOTES or item.parent() is not None: return
-        version = item.data(_COL_VERSION, Qt.UserRole)
-        if not version: return
-        note  = item.text(_COL_NOTES).strip()
-        notes = self._load_notes()
-        key   = self._ver_key(version)
-        if note: notes[key] = note
-        else:    notes.pop(key, None)
-        self._save_notes(notes)
+        note = item.text(_COL_NOTES).strip()
+        for path in item.data(_COL_NOTES, _ROLE_METAS) or []:
+            meta = load_meta(path); meta["note"] = note
+            try: save_meta(path, meta)
+            except Exception as exc:
+                self._set_status(f"Could not save the note: {exc}", error=True); return
+
+    def _version_note(self, version: str) -> str:
+        if self._layout is None: return ""
+        for meta in self._layout.scan().get(version, []):
+            if meta.get("note"): return meta["note"]
+        return ""
 
     # ══════════════════════════════════════════════════════════════════════════
     # Data refresh
@@ -1638,9 +1622,13 @@ class PlayblastTool(*_TOOL_BASES):
             else:
                 from .maya_bridge import get_scene_tokens
                 self._tokens = get_scene_tokens()
+            from .maya_bridge import get_layout
+            self._progress("Reading output paths...")
+            self._layout, layout_warning = get_layout(self._tokens)
+            self._version = self._tokens.version
             self._error_banner.setVisible(False)
         except (ParseError, Exception) as exc:
-            self._tokens = None; self._resolver = None
+            self._tokens = None; self._layout = None
             msg = str(exc)
             if not manual and "No scene file is open" not in msg:
                 msg += "\n\nTo blast this scene anyway, use the Off Pipe tab."
@@ -1652,13 +1640,19 @@ class PlayblastTool(*_TOOL_BASES):
             self._set_status("Could not read this scene - see the message above", error=True)
             return
         src = self._tokens.source
+        piped = self._layout.source == "pipeline"
         self._refresh_btn.setStyleSheet(
-            _S_REFRESH_WARN if src == "scene path" else _S_REFRESH_OK)
-        self._set_status(
-            {"pipeline": "Scene info from the pipeline context",
-             "manual":   "Output goes to the Maya project"}.get(
-                src, "Scene info from the scene path (no pipeline context for this scene)"),
-            error=src == "scene path")
+            _S_REFRESH_OK if piped or src == "manual" else _S_REFRESH_WARN)
+        if layout_warning:
+            self._set_status("Pipeline paths unavailable - using fxBlast's copy of the "
+                             "pipeline layout (details in the Script Editor)", error=True)
+        elif src == "manual":
+            self._set_status("Output goes to the Maya project, in the pipeline layout")
+        elif piped:
+            self._set_status("Output paths from the pipeline")
+        else:
+            self._set_status("Scene is outside the task Maya was launched in - "
+                             "paths built from the scene path", error=True)
         self._cam_resolution_overrides.clear()
         self._cam_res_custom.clear()
         self._cam_follow_rg.clear()
@@ -1689,8 +1683,7 @@ class PlayblastTool(*_TOOL_BASES):
                 self._note_edit.setText(note)
                 self._note_source_lbl.setText("  from file save tool"); return
         except Exception: pass
-        stored = self._load_notes().get(
-            self._ver_key(self._tokens.version) if self._tokens else "", "")
+        stored = self._version_note(self._version)
         self._note_edit.setText(stored)
         self._note_source_lbl.setText("  from stored notes" if stored else "")
 
@@ -1736,93 +1729,72 @@ class PlayblastTool(*_TOOL_BASES):
             self._refresh_dof_info()
 
     def _refresh_version_list(self) -> None:
+        """One row per version of this scene; one child per camera/layer.
+        Found through each blast's fxblast.json in the renders folder."""
         self._ver_tree.blockSignals(True)
         self._ver_tree.clear()
-        if self._tokens is None:
+        if self._layout is None:
             self._ver_tree.blockSignals(False); return
-        try:
-            resolver = self._resolver or build_resolver(self._tokens, image_format=DEFAULT_FORMAT)
-        except Exception:
-            self._ver_tree.blockSignals(False); return
+        found = self._layout.scan()
 
-        current_version = self._tokens.version if self._tokens else ""
-        notes = self._load_notes(); meta = self._load_meta()
+        def centre(item):
+            for col in (_COL_FRAMERANGE, _COL_FRAMES, _COL_FPS, _COL_RESOLUTION):
+                item.setTextAlignment(col, Qt.AlignCenter)
 
-        for ver in resolver.existing_versions():
-            folder   = self._tokens.output_folder(ver)
-            key      = self._ver_key(ver)
-            ver_meta = meta.get(key, {}); note = notes.get(key, "")
+        def rng(frames):
+            if not frames: return "--"
+            a, b = _frame_nums(frames); return f"{a}-{b}"
 
-            flat_frames = _frames_in(folder)       # any format, not just the selected one
-            cam_subfolders = []
-            try:
-                cam_subfolders = sorted([
-                    d for d in os.listdir(folder)
-                    if os.path.isdir(os.path.join(folder, d))
-                    and not d.startswith("_")
-                    and _frames_in(os.path.join(folder, d))
-                ])
-            except Exception: pass
+        for ver in sorted(found, key=lambda v: int(v[1:])):
+            metas = sorted(found[ver], key=lambda m: m["_component"])
+            rows = []
+            for m in metas:
+                ext = FORMAT_EXTENSIONS.get(m.get("format", "jpg"), "jpg")
+                frames_dir = self._layout.frames_dir(m["_component"], ver, ext)
+                rows.append((m, frames_dir, _frames_in(frames_dir),
+                             os.path.dirname(m["_path"])))
+            all_frames = sorted(f for _, _, fr, _ in rows for f in fr)
+            note    = next((m.get("note") for m in metas if m.get("note")), "")
+            fps_str = self._fps_str(metas[0])
+            single  = len(rows) == 1
+            res_str = self._res_str(metas[0], rows[0][2]) if single else "multi-cam"
 
-            is_multi = bool(cam_subfolders) and not flat_frames
-            if is_multi:
-                all_frames = sorted(
-                    f for sf in cam_subfolders
-                    for f in _frames_in(os.path.join(folder, sf))
-                )
-                count = len(all_frames)
-                range_str = (f"{_frame_nums(all_frames)[0]}-{_frame_nums(all_frames)[1]}"
-                             if all_frames else "--")
-                res_str = "multi-cam"
-            else:
-                frames    = flat_frames; count = len(frames)
-                range_str = (f"{_frame_nums(frames)[0]}-{_frame_nums(frames)[1]}"
-                             if frames else "--")
-                res_str   = self._res_str(ver_meta, frames)
-
-            fps_str = self._fps_str(ver_meta)
-            ver_item = QTreeWidgetItem(["", ver, range_str, str(count), fps_str, res_str, note])
+            ver_item = QTreeWidgetItem(["", ver, rng(all_frames), str(len(all_frames)),
+                                        fps_str, res_str, note])
             ver_item.setData(_COL_VERSION, Qt.UserRole, ver)
-            ver_item.setData(_COL_FRAMES,  Qt.UserRole, folder)
+            ver_item.setData(_COL_VERSION, _ROLE_PLAY, rows[0][1] if single else None)
+            ver_item.setData(_COL_VERSION, _ROLE_OPEN,
+                             rows[0][3] if single else self._layout.renders_root)
+            ver_item.setData(_COL_VERSION, _ROLE_DIRS, [r[3] for r in rows])
+            ver_item.setData(_COL_NOTES, _ROLE_METAS, [m["_path"] for m in metas])
             ver_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
-
-            if ver == current_version:
+            if ver == self._version:
                 for col in range(7): ver_item.setBackground(col, _COLOR_CURRENT)
                 ver_item.setText(_COL_VERSION, f"{ver}  *")
+            centre(ver_item)
 
-            for col in (_COL_FRAMERANGE, _COL_FRAMES, _COL_FPS, _COL_RESOLUTION):
-                ver_item.setTextAlignment(col, Qt.AlignCenter)
+            children = []
+            for m, frames_dir, frames, blast_dir in rows:
+                name = m.get("camera", m["_component"])
+                if m.get("layer"): name = f"{m['layer']} / {name}"
+                child = QTreeWidgetItem(["", name, rng(frames), str(len(frames)),
+                                         self._fps_str(m), self._res_str(m, frames), ""])
+                child.setData(_COL_VERSION, Qt.UserRole, name)
+                child.setData(_COL_VERSION, _ROLE_PLAY, frames_dir)
+                child.setData(_COL_VERSION, _ROLE_OPEN, blast_dir)
+                child.setData(_COL_VERSION, _ROLE_DIRS, [blast_dir])
+                child.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                for col in range(7): child.setBackground(col, _COLOR_CHILD)
+                centre(child)
+                ver_item.addChild(child); children.append(child)
+            ver_item.setExpanded(True)
 
-            child_folders = []
-            if is_multi:
-                for sf in cam_subfolders:
-                    sf_folder = os.path.join(folder, sf)
-                    sf_frames = _frames_in(sf_folder)
-                    sf_range  = (f"{_frame_nums(sf_frames)[0]}-{_frame_nums(sf_frames)[1]}"
-                                 if sf_frames else "--")
-                    child = QTreeWidgetItem(["", sf, sf_range, str(len(sf_frames)),
-                                             fps_str, self._res_str({}, sf_frames), ""])
-                    child.setData(_COL_VERSION, Qt.UserRole, sf)
-                    child.setData(_COL_FRAMES,  Qt.UserRole, sf_folder)
-                    child.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-                    for col in range(7): child.setBackground(col, _COLOR_CHILD)
-                    for col in (_COL_FRAMERANGE, _COL_FRAMES, _COL_FPS, _COL_RESOLUTION):
-                        child.setTextAlignment(col, Qt.AlignCenter)
-                    ver_item.addChild(child)
-                    child_folders.append((child, sf_folder))
-                ver_item.setExpanded(True)
-
-            # Widgets can only be set once the item is actually inside the tree.
-            # A multi-cam version row is just a container folder (no frames of
-            # its own) — only its per-camera children are real sequences, so
-            # the play button belongs on them, not on that parent row. A
-            # single-camera version row IS the sequence, so it gets the button.
+            # Widgets can only be set once the item is inside the tree
             self._ver_tree.addTopLevelItem(ver_item)
-            self._ver_tree.setItemWidget(ver_item, _COL_PLAY,
-                                         self._make_row_buttons(folder, play=not is_multi))
-            for child, sf_folder in child_folders:
-                self._ver_tree.setItemWidget(child, _COL_PLAY,
-                                             self._make_row_buttons(sf_folder, play=True))
+            for item in [ver_item] + children:
+                self._ver_tree.setItemWidget(item, _COL_PLAY, self._make_row_buttons(
+                    item.data(_COL_VERSION, _ROLE_OPEN),
+                    play_folder=item.data(_COL_VERSION, _ROLE_PLAY)))
         self._ver_tree.blockSignals(False)
 
     def _fps_str(self, m: dict) -> str:
@@ -2016,53 +1988,33 @@ class PlayblastTool(*_TOOL_BASES):
             menu.addAction("Refresh Version List").triggered.connect(self._refresh_version_list)
             menu.exec_(self._ver_tree.viewport().mapToGlobal(pos))
             return
-        is_child = item.parent() is not None
-        version  = item.data(_COL_VERSION, Qt.UserRole)
-        folder   = item.data(_COL_FRAMES,  Qt.UserRole)
+        name   = item.data(_COL_VERSION, Qt.UserRole)
+        play   = item.data(_COL_VERSION, _ROLE_PLAY)
+        folder = item.data(_COL_VERSION, _ROLE_OPEN)
+        dirs   = item.data(_COL_VERSION, _ROLE_DIRS) or []
         menu = QMenu(self)
-        menu.addAction("Play in RV").triggered.connect(lambda: self._launch_rv(folder))
+        if play:
+            menu.addAction("Play in RV").triggered.connect(lambda: self._launch_rv(play))
         menu.addAction("Open file location").triggered.connect(lambda: self._open_file_location(folder))
         menu.addSeparator()
-        if not is_child:
-            menu.addAction(f"Delete {version}...").triggered.connect(
-                lambda: self._delete_version(version, folder))
-        else:
-            menu.addAction(f"Delete {version}...").triggered.connect(
-                lambda: self._delete_sequence(version, folder))
+        menu.addAction(f"Delete {name}...").triggered.connect(lambda: self._delete_blasts(name, dirs))
         menu.exec_(self._ver_tree.viewport().mapToGlobal(pos))
 
-    def _delete_version(self, version: str, folder: str) -> None:
-        reply = QMessageBox.warning(
-            self, f"Delete {version}?",
-            f"This will permanently delete all frames in:\n\n{folder}\n\nThis cannot be undone.  Continue?",
-            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
-        )
-        if reply != QMessageBox.Yes: return
-        try:
-            shutil.rmtree(folder)
-            for load, save in ((self._load_notes, self._save_notes), (self._load_meta, self._save_meta)):
-                d = load(); key = self._ver_key(version)
-                if key in d: d.pop(key); save(d)
-            self._set_status(f"Deleted {version}")
-        except Exception as exc:
-            QMessageBox.critical(self, "Delete failed", f"Could not delete:\n\n{exc}"); return
-        self._refresh_version_list(); self._update_output_preview()
-
-    def _delete_sequence(self, name: str, folder: str) -> None:
-        """Delete a single camera/layer's frames within a multi-cam version.
-        The version's notes/meta stay put -- they belong to the version as a
-        whole, and its other cameras/layers are unaffected."""
+    def _delete_blasts(self, name: str, dirs: list) -> None:
+        """Delete blast folders (frames, movie and metadata of each)."""
         reply = QMessageBox.warning(
             self, f"Delete {name}?",
-            f"This will permanently delete all frames in:\n\n{folder}\n\nThis cannot be undone.  Continue?",
+            "This will permanently delete these folders (frames and movie):\n\n"
+            + "\n".join(dirs) + "\n\nThis cannot be undone.  Continue?",
             QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
         )
         if reply != QMessageBox.Yes: return
         try:
-            shutil.rmtree(folder)
+            for d in dirs:
+                shutil.rmtree(d)
             self._set_status(f"Deleted {name}")
         except Exception as exc:
-            QMessageBox.critical(self, "Delete failed", f"Could not delete:\n\n{exc}"); return
+            QMessageBox.critical(self, "Delete failed", f"Could not delete:\n\n{exc}")
         self._refresh_version_list(); self._update_output_preview()
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -2079,20 +2031,15 @@ class PlayblastTool(*_TOOL_BASES):
     def _update_output_preview(self) -> None:
         if self._tokens is None:
             self._set_output_paths([]); return
-        fmt = self._sequence_format()
-        try:
-            self._resolver = build_resolver(
-                self._tokens,
-                image_format=fmt, frame_padding=FRAME_PADDING,
-            )
-        except (ResolveError, ValueError) as exc:
-            self._set_output_paths([str(exc)]); self._set_blast_enabled(False); return
+        if self._layout is None:
+            self._set_output_paths([]); return
+        ext = FORMAT_EXTENSIONS[self._sequence_format()]
 
         if self._layers_mode():
             jobs  = self._layer_jobs()
             lines = []
-            lines = [self._resolver.output_folder]   # one subfolder per layer inside
-            self._set_output_paths(lines)
+            self._set_output_paths([self._layout.renders_root])   # one folder per layer
+
             self._set_blast_enabled(bool(jobs))
             return
 
@@ -2101,15 +2048,16 @@ class PlayblastTool(*_TOOL_BASES):
             self._simple_cam_lbl.setText(
                 f"Camera:  {cams[0]['label']}  (active viewport)" if cams else
                 "No camera in the active viewport - click in a viewport, then Refresh scene.")
-        # One camera: its own folder. Several: the version folder holds them.
-        lines = [os.path.join(self._resolver.output_folder, _cam_slug(cams[0]["label"]))
-                 if len(cams) == 1 else self._resolver.output_folder]
-        movie_fmt = self._movie_format()
-        if movie_fmt and cams:
-            from .movie import movie_path
-            lines.append(movie_path(self._tokens.movies_root, self._resolver.output_basename,
-                                    _cam_slug(cams[0]["label"]), movie_fmt)
-                         if len(cams) == 1 else self._tokens.movies_root)
+        # One camera: its frames folder (+ movie). Several: the renders folder.
+        if len(cams) == 1:
+            comp = self._component(cams[0])
+            lines = [self._layout.frames_dir(comp, self._version, ext)]
+            if self._movie_format():
+                w, h = self._blast_size(cams[0])
+                lines.append(self._layout.movie_path(comp, self._version,
+                                                     self._movie_codec(), w, h))
+        else:
+            lines = [self._layout.renders_root]
         self._set_output_paths(lines)
 
         self._set_blast_enabled(bool(cams))
@@ -2138,6 +2086,7 @@ class PlayblastTool(*_TOOL_BASES):
             fmt     = self._sequence_format(),
             movie   = self._movie_format(),
             prores  = self._prores_profile(),
+            codec   = self._movie_codec(),
             burn    = {fid for fid, cb in self._burn_chks.items() if cb.isChecked()},
             burn_section = BURN_IN_CORNERS[self._burn_corner.currentIndex()][1],
             burn_align   = BURN_IN_CORNERS[self._burn_corner.currentIndex()][2],
@@ -2167,7 +2116,24 @@ class PlayblastTool(*_TOOL_BASES):
         )
         return reply == QMessageBox.Yes
 
-    def _blast_one(self, cam: dict, slug: str, s: dict, fps: float,
+    def _component(self, cam: dict, layer: Optional[str] = None) -> str:
+        """<camera>_<descriptor>[_<layer>], camera casing kept."""
+        return self._layout.component(_cam_slug(cam["label"]),
+                                      _cam_slug(layer) if layer else None)
+
+    def _blast_size(self, cam: dict) -> tuple:
+        """Size of the frames on disk (anamorphic blasts are squeezed)."""
+        w, h = self._cam_res(cam["label"])
+        if self._ana_chk.isChecked():
+            from .maya_bridge import calculate_anamorphic_blast_size
+            w, h = calculate_anamorphic_blast_size(w, h, self._squeeze_combo.currentData())
+        return w, h
+
+    def _movie_codec(self) -> str:
+        """Pipeline codec code: h264, or the picked ProRes code (apr/aprx)."""
+        return "h264" if self._movie_format() == "h264" else self._prores_profile()
+
+    def _blast_one(self, cam: dict, comp: str, s: dict, fps: float,
                    hud_camera_name: Optional[str] = None,
                    panel: Optional[str] = None, offscreen: bool = True) -> str:
         """One blast through one camera into <version folder>/<slug>/:
@@ -2185,18 +2151,11 @@ class PlayblastTool(*_TOOL_BASES):
         if s["anam"] and s["squeeze"] is not None:
             cam_w, cam_h = calculate_anamorphic_blast_size(cam_w, cam_h, s["squeeze"])
 
-        cam_folder = os.path.join(self._resolver.output_folder, slug)
-        # The per-camera/per-layer subfolder (slug) already disambiguates
-        # these frames -- repeating it in the filename too just inflates
-        # the path length for no benefit, and can tip long asset/descriptor
-        # names over Windows' 260-char path limit ("Failed to open output
-        # file" on every frame). The version folder + subfolder name is
-        # already a unique, readable location without it.
-        stem        = self._resolver.output_basename
-        frames_stem = os.path.join(cam_folder, stem)
-        burn_in     = s["use_hud"] and bool(s["burn"])
+        lay, ver    = self._layout, self._version
         ext         = FORMAT_EXTENSIONS[s["fmt"]]
-        expected    = [f"{frames_stem}.{n:0{FRAME_PADDING}d}.{ext}"
+        frames_stem = lay.frames_stem(comp, ver, ext)      # path the pipeline gives
+        burn_in     = s["use_hud"] and bool(s["burn"])
+        expected    = [lay.frame_file(comp, ver, ext, n)
                        for n in range(s["start"], s["end"] + 1)]
         # The artist already agreed to overwrite: clear this range first, so
         # afterwards every frame on disk is from this blast.
@@ -2213,9 +2172,9 @@ class PlayblastTool(*_TOOL_BASES):
             if burn_in:
                 hud_snap = setup_hud(**self._burn_hud_args(cam, s, fps, hud_camera_name))
             folder = execute_playblast(
-                resolver=self._resolver, camera=cam["transform"],
+                camera=cam["transform"],
                 width=cam_w, height=cam_h, image_format=s["fmt"],
-                frame_padding=FRAME_PADDING, show_ornaments=burn_in,
+                frame_padding=lay.padding, show_ornaments=burn_in,
                 start_frame=s["start"], end_frame=s["end"],
                 output_path_override=frames_stem,
                 panel=panel, offscreen=offscreen,
@@ -2233,16 +2192,28 @@ class PlayblastTool(*_TOOL_BASES):
 
         # Esc in Maya ends a playblast early without an error: frames missing
         written = sum(1 for f in expected if os.path.isfile(f))
-        print(f"[fxBlast] {slug}: {written}/{len(expected)} frames written")
+        print(f"[fxBlast] {comp}: {written}/{len(expected)} frames written")
         if written < len(expected):
             missing = next(f for f in expected if not os.path.isfile(f))
             print(f"[fxBlast] first missing frame: {missing}")
             raise _Stopped(f"{written} of {len(expected)} frames written")
 
+        movie = None
         if s["movie"]:
             if self._stop_requested:
                 raise _Stopped("Stop pressed")
-            self._encode_movie(frames_stem, slug, s, fps)
+            movie = self._encode_movie(frames_stem, comp, s, fps, cam_w, cam_h)
+
+        # fxblast.json: how the version list finds and describes this blast
+        meta = dict(scene=lay.scene_key, component=comp, version=ver,
+                    camera=cam["label"], layer=s.get("_layer"), note=s["note"],
+                    frame_range=[s["start"], s["end"]], fps=fps,
+                    resolution=[deliver_w, deliver_h], blast_size=[cam_w, cam_h],
+                    format=s["fmt"], movie=movie, tool_version=_tool_version())
+        try:
+            save_meta(lay.meta_path(comp, ver), meta)
+        except Exception as exc:
+            print(f"[fxBlast] could not write {lay.meta_path(comp, ver)}: {exc}")
         return folder
 
     def _burn_shot_info(self) -> str:
@@ -2252,14 +2223,15 @@ class PlayblastTool(*_TOOL_BASES):
         return "   ".join(p for p in (t.show, t.season,
                                        f"{t.type_or_seq}/{t.asset_or_shot}") if p)
 
-    def _encode_movie(self, frames_stem: str, slug: str, s: dict, fps: float) -> None:
-        from .movie import MovieCancelled, MovieError, build_args, encode, movie_path
-        out = movie_path(self._tokens.movies_root, self._resolver.output_basename,
-                         slug, s["movie"])
-        self._progress(f"Encoding movie \u2014 {slug}...")
+    def _encode_movie(self, frames_stem: str, comp: str, s: dict, fps: float,
+                      width: int, height: int) -> str:
+        from .movie import MovieCancelled, MovieError, build_args, encode
+        out = self._layout.movie_path(comp, self._version, s["codec"], width, height)
+        self._progress(f"Encoding movie \u2014 {comp}...")
         args = build_args(frames_stem, FORMAT_EXTENSIONS[s["fmt"]], s["start"], fps,
                           out, s["movie"], s["prores"],
-                          squeeze=s["squeeze"] if s["anam"] else None)
+                          squeeze=s["squeeze"] if s["anam"] else None,
+                          padding=self._layout.padding)
 
         def keep_waiting() -> bool:
             QApplication.processEvents()          # keeps Stop clickable
@@ -2269,46 +2241,26 @@ class PlayblastTool(*_TOOL_BASES):
         except MovieCancelled:
             raise _Stopped("movie encode stopped")
         except MovieError as exc:
-            raise RuntimeError(f"Movie encode failed for {slug}.\n\n{exc}") from exc
+            raise RuntimeError(f"Movie encode failed for {comp}.\n\n{exc}") from exc
         self._movies.append(out)
+        return out
 
     def _after_blast(self, last_folder: Optional[str], s: dict, fps: float,
                      cams: list[dict], layers: Optional[list[str]] = None,
                      stopped: bool = False) -> None:
-        # Frames live in the camera/layer subfolder, not the version folder
-        blast_folder = last_folder or self._resolver.output_folder
-
-        key = self._ver_key(self._resolver.version)
-        if s["note"]:
-            notes = self._load_notes(); notes[key] = s["note"]
-            self._save_notes(notes)
-        try:
-            first_res = self._cam_res(cams[0]["label"])
-            meta = self._load_meta()
-            entry = {
-                "frame_range": [s["start"], s["end"]], "fps": fps,
-                "resolution": list(first_res), "format": s["fmt"],
-                "movie": s["movie"],
-                "cameras": [c["label"] for c in cams],
-            }
-            if layers:
-                entry["layers"] = layers
-            meta[key] = entry
-            self._save_meta(meta)
-        except Exception: pass
-
+        blast_folder = last_folder
         what = ", ".join(layers) if layers else ", ".join(c["label"] for c in cams)
         movies = f"  + {len(self._movies)} movie(s)" if self._movies else ""
         if stopped:
             self._set_status(f"Stopped - finished: [{what}]{movies}", error=True)
         else:
-            self._set_status(f"Done  [{what}]{movies}  \u2192  {self._resolver.output_folder}")
+            self._set_status(f"Done  [{what}]{movies}  \u2192  {blast_folder}")
         self._refresh_version_list()
         if not stopped:
             self._launch_rv(blast_folder)   # fresh blast -> open it in RV automatically
 
     def _on_playblast(self) -> None:
-        if self._tokens is None or self._resolver is None: return
+        if self._tokens is None or self._layout is None: return
         if self._layers_mode():
             self._start_layer_blast(); return
 
@@ -2325,8 +2277,9 @@ class PlayblastTool(*_TOOL_BASES):
             panel = get_active_model_panel()
 
         # Always check each camera's subfolder for existing frames
+        ext = FORMAT_EXTENSIONS[self._sequence_format()]
         if not self._confirm_overwrite([
-                os.path.join(self._resolver.output_folder, _cam_slug(c["label"]))
+                self._layout.frames_dir(self._component(c), self._version, ext)
                 for c in cams]):
             return
 
@@ -2345,7 +2298,7 @@ class PlayblastTool(*_TOOL_BASES):
                 self._progress(f"Blasting {idx+1}/{len(cams)} \u2014 {cam['label']}..."
                                if is_multi else f"Blasting \u2014 {cam['label']}...")
                 try:
-                    last_folder = self._blast_one(cam, _cam_slug(cam["label"]), s, fps,
+                    last_folder = self._blast_one(cam, self._component(cam), s, fps,
                                                   panel=panel)
                 except _Stopped as exc:
                     stopped, stop_reason = True, str(exc) or "Stop pressed"; break
@@ -2377,9 +2330,10 @@ class PlayblastTool(*_TOOL_BASES):
                 "Check at least one render layer. Layers without their own "
                 "camera need a camera checked in the Camera section.")
             return
+        ext = FORMAT_EXTENSIONS[self._sequence_format()]
         if not self._confirm_overwrite([
-                os.path.join(self._resolver.output_folder, _cam_slug(layer))
-                for layer, _ in jobs]):
+                self._layout.frames_dir(self._component(cam, layer), self._version, ext)
+                for layer, cam in jobs]):
             return
         from .maya_bridge import (get_active_model_panel, get_current_render_layer,
                                   get_fps, get_panel_camera)
@@ -2428,7 +2382,7 @@ class PlayblastTool(*_TOOL_BASES):
             if active != layer:
                 lb["errors"].append(f"{layer}: active layer was '{active}' at blast time")
             lb["last"] = self._blast_one(
-                cam, _cam_slug(layer), lb["s"], lb["fps"],
+                cam, self._component(cam, layer), dict(lb["s"], _layer=layer), lb["fps"],
                 hud_camera_name=f"{layer}   {cam['label']}",
                 panel=lb["panel"], offscreen=False,
             )

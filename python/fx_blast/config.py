@@ -100,18 +100,13 @@ FORMAT_EXTENSIONS = {
 MOVIE_FORMATS = ["h264", "prores"]
 
 MOVIE_LABELS = {
-    "h264":   ".mp4",
-    "prores": ".mov",
+    "h264":   ".mov (H.264)",
+    "prores": ".mov (ProRes)",
 }
 
 MOVIE_TOOLTIPS = {
-    "h264":   "H.264 .mp4 - blasts a JPG sequence (kept), then encodes it into the movies folder.",
-    "prores": "ProRes .mov - blasts a PNG sequence (kept), then encodes it into the movies folder.",
-}
-
-MOVIE_EXTENSIONS = {
-    "h264":   "mp4",
-    "prores": "mov",
+    "h264":   "H.264 .mov - blasts a JPG sequence (kept), then encodes it next to the frames.",
+    "prores": "ProRes .mov - blasts a PNG sequence (kept), then encodes it next to the frames.",
 }
 
 MOVIE_SEQUENCE_FORMAT = {
@@ -119,13 +114,13 @@ MOVIE_SEQUENCE_FORMAT = {
     "prores": "png",
 }
 
-# (id, label, prores_ks profile number)
+# (pipeline codec code, label, prores_ks profile number). The pipeline names
+# two ProRes codes; which profile each stands for is a best guess for now.
 PRORES_PROFILES = [
-    ("422",   "422",    2),
-    ("422hq", "422 HQ", 3),
-    ("4444",  "4444",   4),
+    ("apr",  "422 HQ", 3),
+    ("aprx", "4444",   4),
 ]
-DEFAULT_PRORES_PROFILE = "422hq"
+DEFAULT_PRORES_PROFILE = "apr"
 
 # ffmpeg isn't on PATH at this studio; it is a rez package, called through
 # rez-env. FX_FFMPEG_PATH (full path to ffmpeg.exe) skips rez entirely.

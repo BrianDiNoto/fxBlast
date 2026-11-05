@@ -58,6 +58,9 @@ class SceneTokens:
     # Movies folder (FX_MOVIES_DIR, <task>/movies, or the Maya project's)
     movies_root:   str            = field(default="", repr=False)
 
+    # Renders folder: <task>/renders, or <project>/renders for Off Pipe
+    renders_root:  str            = field(default="", repr=False)
+
     # Manual (out-of-pipeline) mode: the scene name is the whole output stem
     stem_override: Optional[str]  = None
 
@@ -143,6 +146,8 @@ def parse_scene_path(scene_path: str) -> SceneTokens:
     tokens = _parse_filename(scene_path, tokens)
     tokens.images_root = _resolve_images_root(scene_path)
     tokens.movies_root = _resolve_movies_root(scene_path, tokens.source)
+    tokens.renders_root = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(scene_path))), "renders")
     return tokens
 
 
@@ -151,7 +156,8 @@ _MANUAL_NAME = re.compile(r"^(?P<stem>.+?)[_.\-]?(?P<version>v\d+)$")
 
 
 def manual_tokens(scene_path: str, project_name: str,
-                  images_root: str, movies_root: str) -> SceneTokens:
+                  images_root: str, movies_root: str,
+                  renders_root: str = "") -> SceneTokens:
     """
     Tokens for a scene outside the pipeline. Output goes to the Maya
     project; the scene name and version come from the workfile name.
@@ -174,6 +180,7 @@ def manual_tokens(scene_path: str, project_name: str,
         images_root   = images_root,
         source        = "manual",
         movies_root   = movies_root,
+        renders_root  = renders_root,
         stem_override = stem,
     )
 
