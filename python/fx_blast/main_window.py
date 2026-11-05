@@ -570,15 +570,17 @@ class PlayblastTool(*_TOOL_BASES):
         root.addWidget(_hline())
         root.addWidget(self._build_format_section())
         root.addWidget(_hline())
-        root.addWidget(self._build_note_section())
+        # Burn-in and Playblast Options: twirl-downs on every tab
         root.addWidget(self._build_burn_in_section())
         self._po_section = self._build_playblast_options_section()
         root.addWidget(self._po_section)
 
-        # Simple tab: which camera will be blasted, then the big button
+        # Simple tab: which camera will be blasted
         self._simple_cam_lbl = QLabel()
         self._simple_cam_lbl.setStyleSheet(f"font-size:11px; color:{_C_DIM};")
         root.addWidget(self._simple_cam_lbl)
+        # Note sits right above the Playblast button on every tab
+        root.addWidget(self._build_note_section())
         root.addWidget(self._build_hero_button())
 
         self._versions_section = self._build_versions_section()
@@ -685,8 +687,7 @@ class PlayblastTool(*_TOOL_BASES):
         """Simple hides the Advanced-only sections. Both tabs share the same
         widgets, so frame range, format, note etc. never go out of sync."""
         simple = self._is_simple()
-        for w in (self._cam_hline, self._cam_section, self._layers_section,
-                  self._po_section):
+        for w in (self._cam_hline, self._cam_section, self._layers_section):
             w.setVisible(not simple)
         self._simple_cam_lbl.setVisible(simple)
         self._manual_box.setVisible(self._is_manual())
