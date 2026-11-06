@@ -12,7 +12,7 @@ from typing import Optional
 
 import maya.cmds as cmds
 
-from .config import DEFAULT_FORMAT, DEFAULT_SQUEEZE_FACTOR, FORMAT_EXTENSIONS, FRAME_PADDING
+from .config import BURN_IN_BLOCK_SIZE, DEFAULT_FORMAT, DEFAULT_SQUEEZE_FACTOR, FORMAT_EXTENSIONS, FRAME_PADDING
 from .scene_parser import ParseError, manual_tokens, parse_scene_path, SceneTokens
 
 _DEFAULT_CAMERAS = {"persp", "top", "front", "side", "perspShape",
@@ -406,7 +406,7 @@ def _add_hud(
     kwargs = dict(
         section        = section,
         block          = block,
-        blockSize      = "large",
+        blockSize      = BURN_IN_BLOCK_SIZE,
         blockAlignment = align,
         label          = label,
         labelFontSize  = "large",

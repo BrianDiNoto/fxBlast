@@ -652,6 +652,8 @@ class PlayblastTool(*_TOOL_BASES):
             self._last_tab_manual = manual
             self._refresh_scene()
         else:
+            if not self._is_simple():
+                self._refresh_cameras()     # list was built while hidden, and may be old
             self._update_output_preview()
         self._refit_height()
 

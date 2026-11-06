@@ -136,18 +136,23 @@ BURN_IN_FIELDS = [
     ("focal",   "Focal length",         True),
     ("res",     "Resolution",           True),
     ("fps",     "FPS",                  True),
-    ("version", "Version",              False),
-    ("frame",   "Frame number",         False),
+    ("version", "Version",              True),
+    ("frame",   "Frame number",         True),
 ]
 
 # (label, Maya HUD section, alignment). Sections: 0-4 top row, 5-9 bottom row.
 BURN_IN_CORNERS = [
-    ("Top left",     0, "left"),
-    ("Top right",    4, "right"),
-    ("Bottom left",  5, "left"),
-    ("Bottom right", 9, "right"),
+    ("Top left",      0, "left"),
+    ("Top right",     4, "right"),
+    ("Bottom left",   5, "left"),
+    ("Bottom center", 7, "center"),
+    ("Bottom right",  9, "right"),
 ]
 DEFAULT_BURN_IN_CORNER = "Top left"
+
+# Height of each burn-in line. Maya's HUD has no line-spacing setting; the
+# block size is the only control. "large" is widest, "small" is tightest.
+BURN_IN_BLOCK_SIZE = "small"
 
 # ── Frame padding ───────────────────────────────────────────────────────────────
 
