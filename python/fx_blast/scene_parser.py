@@ -5,6 +5,7 @@ Supports both asset and shot pipeline paths:
 
   Asset : Y:/shows/{show}/{season}/assets/{assettype}/{asset}/{task}/maya/scenes/
   Shot  : Y:/shows/{show}/{season}/shots/{sequence}/{shot}/{task}/maya/scenes/
+          Y:/shows/{show}/{season}/seq/{sequence}/{shot}/{task}/maya/scenes/
 
 Filename convention:
   {season}_{type_or_seq}_{asset_or_shot}_{task}[_{descriptor}]_{version}.ma/.mb
@@ -72,7 +73,7 @@ class SceneTokens:
 
     @property
     def is_shot(self) -> bool:
-        return self.context_type.lower() == "shots"
+        return self.context_type.lower() in ("shots", "seq")
 
     @property
     def discipline(self) -> str:
@@ -224,14 +225,14 @@ def _parse_path(scene_path: str) -> SceneTokens:
 
     show          = _get(1, "show")
     season        = _get(2, "season")
-    context_type  = _get(3, "context type (assets/shots)")
+    context_type  = _get(3, "context type (assets/shots/seq)")
     type_or_seq   = _get(4, "asset type or sequence")
     asset_or_shot = _get(5, "asset or shot")
     task          = _get(6, "task")
 
-    if context_type.lower() not in ("assets", "shots"):
+    if context_type.lower() not in ("assets", "shots", "seq"):
         raise ParseError(
-            f"Expected 'assets' or 'shots' in the path, found '{context_type}'.\n\n"
+            f"Expected 'assets', 'shots' or 'seq' in the path, found '{context_type}'.\n\n"
             f"Scene path:\n{scene_path}"
         )
 

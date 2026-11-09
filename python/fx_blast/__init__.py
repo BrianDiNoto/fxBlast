@@ -6,5 +6,5 @@ All inter-module imports use relative paths so the package
 can be renamed or relocated without modifying module code.
 """
 
-__version__ = "3.2.0"
+__version__ = "3.2.1"
 __author__  = "VFX Pipeline"
